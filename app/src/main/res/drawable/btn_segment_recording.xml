@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    分段按钮背景（录音态）：实心绿色填充，8dp 圆角。
+    尺寸由布局固定为 72x36dp，padding 由 shape 控制。
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#FF4CAF50" />
+    <corners android:radius="8dp" />
+</shape>

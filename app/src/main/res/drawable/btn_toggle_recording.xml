@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    暂停按钮背景（录音态）：实心绿色填充，8dp 圆角。
+    录音中显示"暂停"，点击后停止录音。
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#FF4CAF50" />
+    <corners android:radius="8dp" />
+</shape>

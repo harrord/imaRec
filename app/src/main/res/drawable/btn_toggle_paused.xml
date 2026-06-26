@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    继续按钮背景（暂停态）：实心琥珀色填充，8dp 圆角。
+    暂停后显示"继续"，琥珀色与绿色区分，提示用户当前处于暂停态。
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#FFFFA000" />
+    <corners android:radius="8dp" />
+</shape>

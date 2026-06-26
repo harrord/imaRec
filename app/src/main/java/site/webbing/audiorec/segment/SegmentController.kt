@@ -137,6 +137,20 @@ class SegmentController(
         }
     }
 
+    /**
+     * 手动分段：结束当前片段并上传，立即开启新片段继续录音。
+     *
+     * 仅在 Recording 阶段有效；Paused / Monitoring / Idle 忽略，避免与暂停或间隔期逻辑冲突。
+     * 与自动分段的 [enterMonitoring] 不同：手动分段不进入间隔期监测，直接开始下一段录音。
+     */
+    fun manualSegment() {
+        if (phase != Phase.Recording) return
+        samplingJob?.cancel()
+        samplingJob = null
+        finalizeAndUploadCurrent()
+        startNewSegment(reason = "手动分段")
+    }
+
     /** 结束整个会话：落盘当前片段并上传，释放所有资源。 */
     fun stopSession() {
         samplingJob?.cancel()

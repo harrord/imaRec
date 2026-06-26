@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    分段按钮背景（暂停态/禁用态）：实心灰色填充，8dp 圆角。
+    暂停录音时分段不可用，显示为灰色禁用样式。
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#FF9E9E9E" />
+    <corners android:radius="8dp" />
+</shape>
