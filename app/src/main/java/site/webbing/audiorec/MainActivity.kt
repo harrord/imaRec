@@ -24,6 +24,19 @@ import site.webbing.audiorec.ui.theme.ImaRecTheme
 class MainActivity : ComponentActivity() {
     private val viewModel: RecordingViewModel by viewModels()
 
+    // "另存为"目标文件名，在用户选择保存路径前记录待保存的录音
+    private var pendingSaveAsRecording: RecordingFile? = null
+
+    private val saveAsLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("audio/mp4"),
+    ) { uri ->
+        val recording = pendingSaveAsRecording
+        pendingSaveAsRecording = null
+        if (uri != null && recording != null) {
+            viewModel.saveRecordingAs(recording, uri)
+        }
+    }
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { permissions ->
@@ -66,6 +79,7 @@ class MainActivity : ComponentActivity() {
                 ImaRecApp(
                     viewModel = viewModel,
                     onStartRecordingRequest = ::startRecordingWithPermissions,
+                    onSaveAsRequest = ::launchSaveAsPicker,
                 )
             }
         }
@@ -102,6 +116,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun launchSaveAsPicker(recording: RecordingFile) {
+        pendingSaveAsRecording = recording
+        saveAsLauncher.launch(recording.name)
+    }
+
     private fun hasPermission(permission: String): Boolean {
         return ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
     }
@@ -111,6 +130,7 @@ class MainActivity : ComponentActivity() {
 private fun ImaRecApp(
     viewModel: RecordingViewModel,
     onStartRecordingRequest: () -> Unit,
+    onSaveAsRequest: (RecordingFile) -> Unit,
 ) {
     var showSettings by rememberSaveable { mutableStateOf(false) }
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -135,6 +155,8 @@ private fun ImaRecApp(
             },
             onSettingsClick = { showSettings = true },
             onRecordingClick = viewModel::onRecordingClick,
+            onRecordingDelete = viewModel::deleteRecording,
+            onRecordingSaveAs = onSaveAsRequest,
             onMessageShown = viewModel::messageShown,
         )
     }

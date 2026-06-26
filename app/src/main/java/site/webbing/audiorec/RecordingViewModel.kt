@@ -1,16 +1,20 @@
 package site.webbing.audiorec
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import site.webbing.audiorec.segment.SegmentInfo
 import site.webbing.audiorec.segment.SegmentStateStore
+import java.io.File
 
 private const val STOP_REFRESH_DELAY_MS = 300L
 
@@ -106,6 +110,39 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
         audioPlayer.toggle(recording.path)
+    }
+
+    /**
+     * 删除本地录音文件。若该文件正在播放，会先停止播放。
+     */
+    fun deleteRecording(recording: RecordingFile) {
+        if (PlaybackStateStore.status.value.activePath == recording.path) {
+            audioPlayer.stop()
+        }
+        val file = File(recording.path)
+        val deleted = file.exists() && file.delete()
+        refreshRecordings()
+        showMessage(if (deleted) "已删除「${recording.name}」" else "删除失败")
+    }
+
+    /**
+     * 将录音文件另存到用户选择的目标位置（通过 SAF 返回的 content Uri）。
+     */
+    fun saveRecordingAs(recording: RecordingFile, destinationUri: Uri) {
+        viewModelScope.launch {
+            val context = getApplication<Application>()
+            val result = withContext(Dispatchers.IO) {
+                val source = File(recording.path)
+                if (!source.exists()) return@withContext "源文件不存在"
+                runCatching {
+                    context.contentResolver.openOutputStream(destinationUri)?.use { output ->
+                        source.inputStream().use { input -> input.copyTo(output) }
+                    } ?: return@withContext "保存失败"
+                    null
+                }.getOrElse { it.localizedMessage ?: "未知错误" }
+            }
+            showMessage(result ?: "已另存为「${recording.name}」")
+        }
     }
 
     fun pausePlayback() {

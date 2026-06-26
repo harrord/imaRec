@@ -6,6 +6,9 @@ import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,34 +24,46 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QuestionMark
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -72,15 +87,81 @@ fun MainScreen(
     onRecordButtonClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onRecordingClick: (RecordingFile) -> Unit,
+    onRecordingDelete: (RecordingFile) -> Unit,
+    onRecordingSaveAs: (RecordingFile) -> Unit,
     onMessageShown: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
+    var menuRecording by remember { mutableStateOf<RecordingFile?>(null) }
+    var pendingDelete by remember { mutableStateOf<RecordingFile?>(null) }
 
     LaunchedEffect(uiState.message) {
         val message = uiState.message ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(message)
         onMessageShown()
+    }
+
+    // 长按文件卡片后弹出的底部菜单
+    val menuSheetState = rememberModalBottomSheetState()
+    if (menuRecording != null) {
+        val recording = menuRecording!!
+        ModalBottomSheet(
+            onDismissRequest = { menuRecording = null },
+            sheetState = menuSheetState,
+        ) {
+            ListItem(
+                headlineContent = {
+                    Text(
+                        text = recording.name,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                supportingContent = { Text("选择操作") },
+            )
+            HorizontalDivider()
+            ListItem(
+                headlineContent = { Text("另存为") },
+                leadingContent = {
+                    Icon(Icons.AutoMirrored.Filled.DriveFileMove, contentDescription = null)
+                },
+                modifier = Modifier.clickable {
+                    onRecordingSaveAs(recording)
+                    menuRecording = null
+                },
+            )
+            ListItem(
+                headlineContent = { Text("删除") },
+                leadingContent = {
+                    Icon(Icons.Default.Delete, contentDescription = null)
+                },
+                modifier = Modifier.clickable {
+                    pendingDelete = recording
+                    menuRecording = null
+                },
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+
+    // 删除确认弹窗
+    if (pendingDelete != null) {
+        val recording = pendingDelete!!
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("删除录音") },
+            text = { Text("确定删除「${recording.name}」吗？此操作不可恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onRecordingDelete(recording)
+                    pendingDelete = null
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) { Text("取消") }
+            },
+        )
     }
 
     Scaffold(
@@ -113,6 +194,7 @@ fun MainScreen(
             playbackEnabled = !uiState.isRecording,
             uploadStatusByFile = uiState.uploadStatusByFile,
             onRecordingClick = onRecordingClick,
+            onRecordingLongClick = { menuRecording = it },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
@@ -127,6 +209,7 @@ private fun RecordingList(
     playbackEnabled: Boolean,
     uploadStatusByFile: Map<String, ImaUploadStatus>,
     onRecordingClick: (RecordingFile) -> Unit,
+    onRecordingLongClick: (RecordingFile) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (recordings.isEmpty()) {
@@ -153,12 +236,14 @@ private fun RecordingList(
                     enabled = playbackEnabled,
                     uploadStatus = uploadStatusByFile[recording.name],
                     onClick = { onRecordingClick(recording) },
+                    onLongClick = { onRecordingLongClick(recording) },
                 )
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun RecordingRow(
     recording: RecordingFile,
@@ -166,6 +251,7 @@ private fun RecordingRow(
     enabled: Boolean,
     uploadStatus: ImaUploadStatus?,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
     val activePath = playback.activePath
     val isActive = activePath == recording.path
@@ -175,14 +261,22 @@ private fun RecordingRow(
     } else {
         MaterialTheme.colorScheme.surfaceVariant
     }
+    val hapticFeedback = LocalHapticFeedback.current
 
     Card(
-        onClick = onClick,
-        enabled = enabled,
         colors = CardDefaults.cardColors(
             containerColor = containerColor,
         ),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                enabled = enabled,
+                onClick = onClick,
+                onLongClick = {
+                    hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onLongClick()
+                },
+            ),
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
