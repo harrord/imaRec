@@ -112,6 +112,7 @@ private fun ImaRecApp(
                 }
             },
             onSettingsClick = { showSettings = true },
+            onRecordingClick = viewModel::onRecordingClick,
             onMessageShown = viewModel::messageShown,
         )
     }

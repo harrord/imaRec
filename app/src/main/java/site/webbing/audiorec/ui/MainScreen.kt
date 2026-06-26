@@ -16,6 +16,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
@@ -25,6 +27,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -39,9 +42,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import site.webbing.audiorec.PlaybackStatus
 import site.webbing.audiorec.RecordingFile
 import site.webbing.audiorec.RecordingStatus
 import site.webbing.audiorec.RecordingUiState
+import site.webbing.audiorec.activePath
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
@@ -52,6 +57,7 @@ fun MainScreen(
     uiState: RecordingUiState,
     onRecordButtonClick: () -> Unit,
     onSettingsClick: () -> Unit,
+    onRecordingClick: (RecordingFile) -> Unit,
     onMessageShown: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -88,6 +94,9 @@ fun MainScreen(
     ) { innerPadding ->
         RecordingList(
             recordings = uiState.recordings,
+            playback = uiState.playback,
+            playbackEnabled = !uiState.isRecording,
+            onRecordingClick = onRecordingClick,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
@@ -98,6 +107,9 @@ fun MainScreen(
 @Composable
 private fun RecordingList(
     recordings: List<RecordingFile>,
+    playback: PlaybackStatus,
+    playbackEnabled: Boolean,
+    onRecordingClick: (RecordingFile) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (recordings.isEmpty()) {
@@ -118,45 +130,123 @@ private fun RecordingList(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             items(recordings, key = { it.path }) { recording ->
-                RecordingRow(recording)
+                RecordingRow(
+                    recording = recording,
+                    playback = playback,
+                    enabled = playbackEnabled,
+                    onClick = { onRecordingClick(recording) },
+                )
             }
         }
     }
 }
 
 @Composable
-private fun RecordingRow(recording: RecordingFile) {
+private fun RecordingRow(
+    recording: RecordingFile,
+    playback: PlaybackStatus,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val activePath = playback.activePath
+    val isActive = activePath == recording.path
+    val isPlaying = isActive && playback is PlaybackStatus.Playing
+    val containerColor = if (isActive) {
+        MaterialTheme.colorScheme.primaryContainer
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant
+    }
+
     Card(
+        onClick = onClick,
+        enabled = enabled,
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            containerColor = containerColor,
         ),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(
-                text = recording.name,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(
-                    text = recording.lastModifiedText(),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                val icon = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow
+                val iconTint = if (isActive) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                Icon(
+                    imageVector = icon,
+                    contentDescription = if (isPlaying) "暂停" else "播放",
+                    tint = iconTint,
                 )
-                Text(
-                    text = recording.sizeText(),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = recording.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = recording.lastModifiedText(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            text = recording.sizeText(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+
+            if (isActive) {
+                val positionMs = when (playback) {
+                    is PlaybackStatus.Playing -> playback.positionMs
+                    is PlaybackStatus.Paused -> playback.positionMs
+                    PlaybackStatus.Idle -> 0
+                }
+                val durationMs = when (playback) {
+                    is PlaybackStatus.Playing -> playback.durationMs
+                    is PlaybackStatus.Paused -> playback.durationMs
+                    PlaybackStatus.Idle -> 0
+                }
+                val progress = if (durationMs > 0) {
+                    (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+                } else {
+                    0f
+                }
+
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth(),
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = formatMillis(positionMs),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = formatMillis(durationMs),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
@@ -223,4 +313,11 @@ private fun RecordingFile.sizeText(): String {
     val kb = sizeBytes / 1024.0
     if (kb < 1024) return String.format(Locale.getDefault(), "%.1f KB", kb)
     return String.format(Locale.getDefault(), "%.1f MB", kb / 1024.0)
+}
+
+private fun formatMillis(ms: Int): String {
+    val totalSeconds = (ms.coerceAtLeast(0)) / 1000
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
 }
