@@ -2,9 +2,19 @@
 <!--
     暂停按钮背景（录音态）：实心绿色填充，8dp 圆角。
     录音中显示"暂停"，点击后停止录音。
+    state_pressed 按下时切换为深绿，提供点击视觉反馈。
 -->
-<shape xmlns:android="http://schemas.android.com/apk/res/android"
-    android:shape="rectangle">
-    <solid android:color="#FF4CAF50" />
-    <corners android:radius="8dp" />
-</shape>
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#FF357A38" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#FF4CAF50" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+</selector>

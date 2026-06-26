@@ -1,10 +1,12 @@
 package site.webbing.audiorec.segment
 
 import android.content.Context
+import android.media.MediaMetadataRetriever
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.PowerManager
 import android.util.Log
+import android.widget.Toast
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -290,7 +292,7 @@ class SegmentController(
         }
     }
 
-    /** 停止 MediaRecorder 并把当前文件加入上传队列。 */
+    /** 停止 MediaRecorder 并把当前文件加入上传队列。过短的片段直接丢弃。 */
     private fun finalizeAndUploadCurrent() {
         val file = currentFile
         val recorder = mediaRecorder
@@ -305,10 +307,50 @@ class SegmentController(
             mediaRecorder = null
         }
         if (file != null && file.exists() && file.length() > 0) {
-            uploader.enqueueUpload(file)
+            val durationMs = getSegmentDurationMs(file)
+            if (durationMs < MIN_SEGMENT_DURATION_MS) {
+                // 10 秒以内的片段不保存、不上传，直接丢弃。
+                // 覆盖手动停止、手动分段、自动分段、定时停止等所有产生文件的路径。
+                Log.d(TAG, "discard short segment: ${file.name} duration=${durationMs}ms")
+                file.delete()
+                Toast.makeText(
+                    service,
+                    "录音时长不足 10 秒，已丢弃",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            } else {
+                uploader.enqueueUpload(file)
+            }
         }
         currentFile = null
     }
+
+    /**
+     * 获取片段时长（毫秒）。优先用 [MediaMetadataRetriever] 读取文件真实时长，
+     * 这样暂停期间未写入的数据不会计入，判断最准确；读取失败时退回墙钟时间兜底，
+     * 避免因读取异常误删有效数据（墙钟含暂停时间会偏长，倾向保守少丢弃）。
+     */
+    private fun getSegmentDurationMs(file: File): Long {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull()
+                ?: wallClockSegmentMs()
+        } catch (e: Exception) {
+            Log.e(TAG, "get segment duration failed", e)
+            wallClockSegmentMs()
+        } finally {
+            try {
+                retriever.release()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /** 墙钟估算的片段时长，含暂停时间会偏长，仅作兜底用。无基准时返回 MAX_VALUE 以保留文件。 */
+    private fun wallClockSegmentMs(): Long =
+        if (segmentStartMs > 0) System.currentTimeMillis() - segmentStartMs else Long.MAX_VALUE
 
     // ── 定时停止 ──
 
@@ -430,5 +472,7 @@ class SegmentController(
         private const val TAG = "SegmentController"
         private const val SAMPLE_INTERVAL_MS = 100L
         private const val STOP_CHECK_INTERVAL_MS = 30_000L
+        /** 片段最小有效时长，低于此值的片段不保存、不上传，直接丢弃。 */
+        private const val MIN_SEGMENT_DURATION_MS = 10_000L
     }
 }

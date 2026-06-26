@@ -122,15 +122,17 @@ class NotificationHelper(private val context: Context) {
     }
 
     /**
-     * 仅刷新声波 ImageView 的 Bitmap，不重建整个通知。
+     * 刷新声波 ImageView 的 Bitmap。
      *
-     * 通过构造一个只含 ImageView 更新的 RemoteViews 应用到已显示的通知上，
-     * 系统只会重绘 ImageView 区域，按钮等其他 view 保持不变（包括 ripple 状态）。
-     * 这是避免声波动画期间通知频繁重建导致卡顿的关键。
+     * 注意：必须复用 [buildCardViews] 重建完整 RemoteViews，而不仅是设置 ImageView。
+     * 因为 NotificationManager.notify() 替换 setCustomContentView 时会整体重 inflate，
+     * 若从 XML 新建 RemoteViews，按钮文本/背景会被重置为 XML 默认值（"暂停"+绿色），
+     * 导致暂停后 60ms 内"继续"文案被覆盖回去。此处传入 [isPaused] 保证每帧都
+     * 重新应用正确的按钮文案、背景与点击意图。Bitmap 生成已在后台线程完成，此处仅做
+     * 轻量 RemoteViews setter，性能可接受。
      */
-    fun updateWaveBitmap(bitmap: Bitmap) {
-        val views = RemoteViews(context.packageName, R.layout.notification_recording)
-        views.setImageViewBitmap(R.id.wave_image, bitmap)
+    fun updateWaveBitmap(bitmap: Bitmap, isPaused: Boolean) {
+        val views = buildCardViews(isPaused, bitmap)
         NotificationManagerCompat.from(context).notify(
             RECORDING_NOTIFICATION_ID,
             NotificationCompat.Builder(context, RECORDING_CHANNEL_ID)

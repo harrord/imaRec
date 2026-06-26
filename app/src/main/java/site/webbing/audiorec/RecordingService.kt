@@ -158,7 +158,7 @@ class RecordingService : Service() {
                     NotificationHelper.generateWaveBitmap(waveFrame, active)
                 }
                 // 主线程刷新通知 ImageView（不重建整个通知）
-                notificationHelper.updateWaveBitmap(bmp)
+                notificationHelper.updateWaveBitmap(bmp, isPaused = !active)
                 waveFrame++
             }
         }
