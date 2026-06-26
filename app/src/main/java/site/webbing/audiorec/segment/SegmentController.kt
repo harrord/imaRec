@@ -292,7 +292,7 @@ class SegmentController(
         }
     }
 
-    /** 停止 MediaRecorder 并把当前文件加入上传队列。过短的片段直接丢弃。 */
+    /** 停止 MediaRecorder 并把当前文件加入上传队列。过短的片段保留到本地但不上传。 */
     private fun finalizeAndUploadCurrent() {
         val file = currentFile
         val recorder = mediaRecorder
@@ -309,13 +309,12 @@ class SegmentController(
         if (file != null && file.exists() && file.length() > 0) {
             val durationMs = getSegmentDurationMs(file)
             if (durationMs < MIN_SEGMENT_DURATION_MS) {
-                // 10 秒以内的片段不保存、不上传，直接丢弃。
+                // 10 秒以内的片段保留到本地，但不上传。
                 // 覆盖手动停止、手动分段、自动分段、定时停止等所有产生文件的路径。
-                Log.d(TAG, "discard short segment: ${file.name} duration=${durationMs}ms")
-                file.delete()
+                Log.d(TAG, "skip upload for short segment: ${file.name} duration=${durationMs}ms")
                 Toast.makeText(
                     service,
-                    "录音时长不足 10 秒，已丢弃",
+                    "录音时长不足 10 秒，已保存但不上传",
                     Toast.LENGTH_SHORT,
                 ).show()
             } else {
@@ -472,7 +471,7 @@ class SegmentController(
         private const val TAG = "SegmentController"
         private const val SAMPLE_INTERVAL_MS = 100L
         private const val STOP_CHECK_INTERVAL_MS = 30_000L
-        /** 片段最小有效时长，低于此值的片段不保存、不上传，直接丢弃。 */
+        /** 片段最小上传时长，低于此值的片段保留到本地但不上传。 */
         private const val MIN_SEGMENT_DURATION_MS = 10_000L
     }
 }
