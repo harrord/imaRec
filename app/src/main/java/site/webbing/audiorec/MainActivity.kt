@@ -16,6 +16,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import site.webbing.audiorec.segment.SegmentSettings
 import site.webbing.audiorec.ui.MainScreen
 import site.webbing.audiorec.ui.SettingsScreen
 import site.webbing.audiorec.ui.theme.ImaRecTheme
@@ -34,11 +35,25 @@ class MainActivity : ComponentActivity() {
         } else {
             true
         }
+        // 步数继续为可选功能：未授权不阻塞录音，仅提示后继续
+        val hasStepPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            permissions[Manifest.permission.ACTIVITY_RECOGNITION]
+                ?: hasPermission(Manifest.permission.ACTIVITY_RECOGNITION)
+        } else {
+            true
+        }
 
         when {
             !hasAudioPermission -> viewModel.showMessage("需要麦克风权限才能录音")
             !hasNotificationPermission -> viewModel.showMessage("需要通知权限才能在通知栏和锁屏显示录音状态")
-            else -> viewModel.startRecording()
+            else -> {
+                if (!hasStepPermission &&
+                    SegmentSettings.get(this).config.value.stepStartEnabled
+                ) {
+                    viewModel.showMessage("未授予活动识别权限，步数继续功能暂不可用")
+                }
+                viewModel.startRecording()
+            }
         }
     }
 
@@ -70,6 +85,13 @@ class MainActivity : ComponentActivity() {
                 !hasPermission(Manifest.permission.POST_NOTIFICATIONS)
             ) {
                 add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            // 仅在用户启用了"步数继续"时才申请活动识别权限，避免给不需要分段的用户造成弹窗
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                SegmentSettings.get(this@MainActivity).config.value.stepStartEnabled &&
+                !hasPermission(Manifest.permission.ACTIVITY_RECOGNITION)
+            ) {
+                add(Manifest.permission.ACTIVITY_RECOGNITION)
             }
         }
 

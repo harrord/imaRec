@@ -45,6 +45,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import site.webbing.audiorec.ImaSettings
 import site.webbing.audiorec.ImaUploader
 import site.webbing.audiorec.KnowledgeBaseOption
+import site.webbing.audiorec.segment.SegmentConfig
+import site.webbing.audiorec.segment.SegmentSettings
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -55,6 +57,8 @@ fun SettingsScreen(
     val context = LocalContext.current
     val settings = remember { ImaSettings.get(context) }
     val config by settings.config.collectAsStateWithLifecycle()
+    val segmentSettings = remember { SegmentSettings.get(context) }
+    val segmentConfig by segmentSettings.config.collectAsStateWithLifecycle()
 
     Scaffold(
         modifier = modifier,
@@ -130,8 +134,122 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.primary,
                 )
             }
+
+            // ── 自动分段 ──
+            Text(
+                text = "自动分段",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                text = "开启后录音全程不停止，按条件自动切片保存并上传；切片后进入监测间隔期，等待“继续条件”满足再开新片段。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            AutoSegmentSection(
+                config = segmentConfig,
+                onToggle = { enabled -> segmentSettings.update { it.copy(autoSegmentEnabled = enabled) } },
+                onSilenceThresholdChange = { v -> segmentSettings.update { it.copy(silenceThresholdDb = v) } },
+                onSilenceSustainChange = { v -> segmentSettings.update { it.copy(silenceSustainMinutes = v) } },
+                onStepEnabledChange = { v -> segmentSettings.update { it.copy(stepStartEnabled = v) } },
+                onStepThresholdChange = { v -> segmentSettings.update { it.copy(stepStartThreshold = v) } },
+                onDbOffsetChange = { v -> segmentSettings.update { it.copy(dbCalibrationOffset = v) } },
+            )
         }
     }
+}
+
+@Composable
+private fun AutoSegmentSection(
+    config: SegmentConfig,
+    onToggle: (Boolean) -> Unit,
+    onSilenceThresholdChange: (Int) -> Unit,
+    onSilenceSustainChange: (Int) -> Unit,
+    onStepEnabledChange: (Boolean) -> Unit,
+    onStepThresholdChange: (Int) -> Unit,
+    onDbOffsetChange: (Int) -> Unit,
+) {
+    androidx.compose.foundation.layout.Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.padding(end = 16.dp)) {
+            Text(text = "启用自动分段", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = "录音不停止，按条件自动切片",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(checked = config.autoSegmentEnabled, onCheckedChange = onToggle)
+    }
+
+    if (!config.autoSegmentEnabled) return
+
+    IntField(
+        label = "安静阈值（dB SPL，0~120）",
+        value = config.silenceThresholdDb,
+        onChange = onSilenceThresholdChange,
+    )
+    IntField(
+        label = "安静持续时长（分钟）",
+        value = config.silenceSustainMinutes,
+        onChange = onSilenceSustainChange,
+    )
+
+    androidx.compose.foundation.layout.Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.padding(end = 16.dp)) {
+            Text(text = "步数继续", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = "间隔期步数变化达阈值后开始新片段",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(checked = config.stepStartEnabled, onCheckedChange = onStepEnabledChange)
+    }
+    if (config.stepStartEnabled) {
+        IntField(
+            label = "步数变化阈值（步）",
+            value = config.stepStartThreshold,
+            onChange = onStepThresholdChange,
+        )
+    }
+
+    IntField(
+        label = "分贝校准偏移（高级，默认 90）",
+        value = config.dbCalibrationOffset,
+        onChange = onDbOffsetChange,
+    )
+    Text(
+        text = "分贝为相对估算值（dBFS + 偏移），不同设备有差异，可在此校准。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+private fun IntField(
+    label: String,
+    value: Int,
+    onChange: (Int) -> Unit,
+) {
+    var text by rememberSaveable(value) { mutableStateOf(value.toString()) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { input ->
+            val filtered = input.filter { it.isDigit() }
+            text = filtered
+            filtered.toIntOrNull()?.let(onChange)
+        },
+        label = { Text(label) },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 @Composable

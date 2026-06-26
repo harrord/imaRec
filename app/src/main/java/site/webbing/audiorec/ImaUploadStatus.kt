@@ -36,7 +36,24 @@ object ImaUploadStateStore {
     private val _status = MutableStateFlow<ImaUploadStatus>(ImaUploadStatus.Idle)
     val status: StateFlow<ImaUploadStatus> = _status.asStateFlow()
 
+    /**
+     * 按录音文件名记录的最近一次上传状态，供文件列表逐卡片展示上传结果。
+     * 仅在内存中保留（与 [status] 一致，Activity 重建后可恢复，进程重启后清空）。
+     */
+    private val _statusByFile = MutableStateFlow<Map<String, ImaUploadStatus>>(emptyMap())
+    val statusByFile: StateFlow<Map<String, ImaUploadStatus>> = _statusByFile.asStateFlow()
+
     fun set(status: ImaUploadStatus) {
         _status.value = status
+        // 同步按文件名记录：Uploading/Success/Failed 均带 fileName；Idle 无文件名，跳过。
+        val fileName = when (status) {
+            is ImaUploadStatus.Uploading -> status.fileName
+            is ImaUploadStatus.Success -> status.fileName
+            is ImaUploadStatus.Failed -> status.fileName
+            ImaUploadStatus.Idle -> null
+        }
+        if (fileName != null) {
+            _statusByFile.value = _statusByFile.value + (fileName to status)
+        }
     }
 }

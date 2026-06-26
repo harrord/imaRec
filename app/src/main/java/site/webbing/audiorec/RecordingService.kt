@@ -4,37 +4,65 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.media.MediaRecorder
-import android.os.Build
 import android.os.IBinder
-import android.os.PowerManager
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
-import android.widget.Toast
 import androidx.core.content.ContextCompat
-import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import site.webbing.audiorec.segment.SegmentController
+import site.webbing.audiorec.segment.SegmentSettings
+import site.webbing.audiorec.segment.StepSensorProvider
 
+/**
+ * 录音前台 Service。
+ *
+ * 自引入自动分段后，本类只负责：
+ * - 前台通知与 [MediaSessionCompat] 的生命周期与状态同步
+ * - Intent 分发（开始 / 停止 / 切换暂停）
+ * - 持有并驱动 [SegmentController]（录音引擎、分片、采样、上传触发均在 Controller 内）
+ *
+ * 录音状态变更由 Controller 通过 [onStatusUpdate] 回调上报，本类据此更新通知与 MediaSession；
+ * 回到 [RecordingStatus.Idle] 时清理前台并 stopSelf。
+ */
 class RecordingService : Service() {
     private lateinit var notificationHelper: NotificationHelper
-    private lateinit var fileManager: RecordingFileManager
-    private var mediaRecorder: MediaRecorder? = null
-    private var currentFile: File? = null
-    private var wakeLock: PowerManager.WakeLock? = null
+    private lateinit var controller: SegmentController
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
     private var mediaSession: MediaSessionCompat? = null
 
     override fun onCreate() {
         super.onCreate()
         notificationHelper = NotificationHelper(this)
-        fileManager = RecordingFileManager(this)
         notificationHelper.createChannel()
+
+        controller = SegmentController(
+            service = this,
+            fileManager = RecordingFileManager(this),
+            uploader = ImaUploader.get(this),
+            settings = SegmentSettings.get(this),
+            stepProvider = StepSensorProvider.get(this),
+            scope = scope,
+        )
+        controller.onStatusUpdate = { status ->
+            updateMediaSessionState(status)
+            notificationHelper.updateRecordingNotification(status, mediaSession?.sessionToken)
+            if (status is RecordingStatus.Idle) {
+                stopForegroundSafely()
+                stopSelf()
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START_RECORDING -> startRecording()
             ACTION_STOP_RECORDING -> stopRecording()
-            ACTION_TOGGLE_PAUSE -> togglePause()
+            ACTION_TOGGLE_PAUSE -> this@RecordingService.controller.togglePause()
         }
         return START_NOT_STICKY
     }
@@ -42,158 +70,38 @@ class RecordingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        releaseRecorder()
-        releaseWakeLock()
+        // 兜底：确保会话资源释放
+        if (controller.isActive) controller.stopSession()
+        scope.cancel()
         releaseMediaSession()
         RecordingStateStore.update(RecordingStatus.Idle)
         super.onDestroy()
     }
 
     private fun startRecording() {
-        if (mediaRecorder != null) return
-
-        val outputFile = fileManager.createRecordingFile()
-        val recorder = createMediaRecorder().apply {
-            setAudioSource(MediaRecorder.AudioSource.MIC)
-            setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            setAudioSamplingRate(44_100)
-            setAudioEncodingBitRate(128_000)
-            setOutputFile(outputFile.absolutePath)
-        }
-
-        try {
-            val startingStatus = RecordingStatus.Recording(outputFile)
-            setupMediaSession()
-            updateMediaSessionState(isRecording = true)
-            startForeground(
-                RECORDING_NOTIFICATION_ID,
-                notificationHelper.buildRecordingNotification(startingStatus, mediaSession?.sessionToken),
-            )
-            recorder.prepare()
-            recorder.start()
-            mediaRecorder = recorder
-            currentFile = outputFile
-            acquireWakeLock()
-            RecordingStateStore.update(startingStatus)
-        } catch (exception: Exception) {
-            recorder.releaseSafely()
-            outputFile.delete()
-            currentFile = null
-            releaseMediaSession()
-            RecordingStateStore.update(RecordingStatus.Idle)
-            stopForegroundSafely()
-            stopSelf()
-            Toast.makeText(this, "开始录音失败：${exception.localizedMessage ?: "未知错误"}", Toast.LENGTH_LONG).show()
-        }
+        if (controller.isActive) return
+        setupMediaSession()
+        // 必须在 5s 内 startForeground，先用初始通知占位，
+        // Controller.startSession() 会立即回调 onStatusUpdate 更新为真实状态。
+        startForeground(
+            RECORDING_NOTIFICATION_ID,
+            notificationHelper.buildRecordingNotification(RecordingStatus.Idle, mediaSession?.sessionToken),
+        )
+        controller.startSession()
     }
 
     private fun stopRecording() {
-        val recorder = mediaRecorder
-        val recordedFile = currentFile
-
-        try {
-            recorder?.stop()
-            // 录音文件已落盘，触发 IMA 上传。
-            // ImaUploader 自带协程作用域（IO + SupervisorJob），不受 Service 销毁影响。
-            recordedFile?.let { ImaUploader.get(this).uploadRecording(it) }
-        } catch (exception: RuntimeException) {
-            recordedFile?.delete()
-            Toast.makeText(this, "录音时间过短或保存失败，已丢弃本次录音", Toast.LENGTH_LONG).show()
-        } finally {
-            releaseRecorder()
-            releaseWakeLock()
-            releaseMediaSession()
-            currentFile = null
-            RecordingStateStore.update(RecordingStatus.Idle)
-            stopForegroundSafely()
-            stopSelf()
-        }
-    }
-
-    private fun togglePause() {
-        val recorder = mediaRecorder ?: return
-        val file = currentFile ?: return
-
-        when (RecordingStateStore.status.value) {
-            is RecordingStatus.Recording -> {
-                try {
-                    recorder.pause()
-                    val status = RecordingStatus.Paused(file)
-                    RecordingStateStore.update(status)
-                    updateMediaSessionState(isRecording = false)
-                    notificationHelper.updateRecordingNotification(status, mediaSession?.sessionToken)
-                    releaseWakeLock()
-                } catch (exception: RuntimeException) {
-                    Toast.makeText(this, "暂停录音失败", Toast.LENGTH_SHORT).show()
-                }
-            }
-            is RecordingStatus.Paused -> {
-                try {
-                    recorder.resume()
-                    val status = RecordingStatus.Recording(file)
-                    RecordingStateStore.update(status)
-                    updateMediaSessionState(isRecording = true)
-                    notificationHelper.updateRecordingNotification(status, mediaSession?.sessionToken)
-                    acquireWakeLock()
-                } catch (exception: RuntimeException) {
-                    Toast.makeText(this, "继续录音失败", Toast.LENGTH_SHORT).show()
-                }
-            }
-            RecordingStatus.Idle -> Unit
-        }
-    }
-
-    private fun createMediaRecorder(): MediaRecorder {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            MediaRecorder(this)
-        } else {
-            @Suppress("DEPRECATION")
-            MediaRecorder()
-        }
-    }
-
-    private fun releaseRecorder() {
-        mediaRecorder?.releaseSafely()
-        mediaRecorder = null
-    }
-
-    private fun MediaRecorder.releaseSafely() {
-        try {
-            reset()
-        } catch (_: RuntimeException) {
-        }
-        try {
-            release()
-        } catch (_: RuntimeException) {
-        }
+        controller.stopSession()
+        // Controller 会在 stopSession 末尾 publish Idle，触发 onStatusUpdate 完成 stopForeground/stopSelf
     }
 
     private fun stopForegroundSafely() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
             @Suppress("DEPRECATION")
             stopForeground(true)
         }
-    }
-
-    private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == true) return
-        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK,
-            "imaRec::recording-wakelock",
-        ).also { it.acquire() }
-    }
-
-    private fun releaseWakeLock() {
-        wakeLock?.let {
-            if (it.isHeld) {
-                it.release()
-            }
-        }
-        wakeLock = null
     }
 
     private fun setupMediaSession() {
@@ -209,11 +117,11 @@ class RecordingService : Service() {
             setSessionActivity(sessionActivityPendingIntent)
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() {
-                    if (RecordingStateStore.status.value is RecordingStatus.Paused) togglePause()
+                    if (RecordingStateStore.status.value is RecordingStatus.Paused) this@RecordingService.controller.togglePause()
                 }
 
                 override fun onPause() {
-                    if (RecordingStateStore.status.value is RecordingStatus.Recording) togglePause()
+                    if (RecordingStateStore.status.value is RecordingStatus.Recording) this@RecordingService.controller.togglePause()
                 }
 
                 override fun onStop() {
@@ -224,19 +132,23 @@ class RecordingService : Service() {
         }
     }
 
-    private fun updateMediaSessionState(isRecording: Boolean) {
+    private fun updateMediaSessionState(status: RecordingStatus) {
         val session = mediaSession ?: return
-        val state = if (isRecording) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
+        val (state, title) = when (status) {
+            is RecordingStatus.Recording -> PlaybackStateCompat.STATE_PLAYING to "正在录音"
+            is RecordingStatus.Paused -> PlaybackStateCompat.STATE_PAUSED to "录音已暂停"
+            is RecordingStatus.Monitoring -> PlaybackStateCompat.STATE_PAUSED to "监测中·等待活动"
+            RecordingStatus.Idle -> PlaybackStateCompat.STATE_NONE to "imaRec"
+        }
         val actions = PlaybackStateCompat.ACTION_PLAY or
-                PlaybackStateCompat.ACTION_PAUSE or
-                PlaybackStateCompat.ACTION_STOP
+            PlaybackStateCompat.ACTION_PAUSE or
+            PlaybackStateCompat.ACTION_STOP
         val playbackState = PlaybackStateCompat.Builder()
             .setActions(actions)
             .setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
             .build()
         session.setPlaybackState(playbackState)
 
-        val title = if (isRecording) "正在录音" else "录音已暂停"
         val metadata = MediaMetadataCompat.Builder()
             .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
             .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, "imaRec")

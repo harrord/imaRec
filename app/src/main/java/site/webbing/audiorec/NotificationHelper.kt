@@ -46,10 +46,28 @@ class NotificationHelper(private val context: Context) {
     ): Notification {
         createChannel()
 
-        val isPaused = status is RecordingStatus.Paused
-        val contentText = if (isPaused) "录音已暂停" else "正在录音"
-        val actionText = if (isPaused) "继续" else "暂停"
-        val actionIcon = if (isPaused) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause
+        // 不同状态：文案、是否显示暂停/继续按钮不同
+        val contentText: String
+        val toggleAction: Pair<String, Int>? // (文案, 图标) ，null 表示该状态不显示切换按钮
+        when (status) {
+            is RecordingStatus.Recording -> {
+                contentText = "正在录音"
+                toggleAction = "暂停" to android.R.drawable.ic_media_pause
+            }
+            is RecordingStatus.Paused -> {
+                contentText = "录音已暂停"
+                toggleAction = "继续" to android.R.drawable.ic_media_play
+            }
+            is RecordingStatus.Monitoring -> {
+                // 间隔期：录音未停止，但不写文件，等待"继续条件"满足。不提供暂停按钮。
+                contentText = "监测中·等待活动"
+                toggleAction = null
+            }
+            RecordingStatus.Idle -> {
+                contentText = "imaRec"
+                toggleAction = null
+            }
+        }
 
         val openAppIntent = Intent(context, MainActivity::class.java)
         val openAppPendingIntent = PendingIntent.getActivity(
@@ -90,16 +108,22 @@ class NotificationHelper(private val context: Context) {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .addAction(actionIcon, actionText, togglePendingIntent)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", stopPendingIntent)
+
+        // 切换按钮（暂停/继续）按状态添加，监测期不显示
+        toggleAction?.let { (text, icon) ->
+            builder.addAction(icon, text, togglePendingIntent)
+        }
+        builder.addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", stopPendingIntent)
 
         // 绑定 MediaSession 后，系统会在锁屏绘制媒体卡片（跟音乐 App 一样的机制），
-        // setShowActionsInCompactView 指定锁屏卡片上显示哪些操作按钮的下标
+        // setShowActionsInCompactView 指定锁屏卡片上显示哪些操作按钮的下标。
+        // 有切换按钮时显示 [切换, 停止] 两个；否则只显示 [停止]。
         if (mediaSessionToken != null) {
+            val compactIndices = if (toggleAction != null) intArrayOf(0, 1) else intArrayOf(0)
             builder.setStyle(
                 MediaStyle()
                     .setMediaSession(mediaSessionToken)
-                    .setShowActionsInCompactView(0, 1)
+                    .setShowActionsInCompactView(*compactIndices)
             )
         }
 

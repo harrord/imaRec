@@ -1,5 +1,11 @@
 package site.webbing.audiorec.ui
 
+import androidx.compose.animation.animateColor
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,9 +21,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.QuestionMark
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
@@ -36,17 +44,23 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import site.webbing.audiorec.ImaUploadStatus
 import site.webbing.audiorec.PlaybackStatus
 import site.webbing.audiorec.RecordingFile
 import site.webbing.audiorec.RecordingStatus
 import site.webbing.audiorec.RecordingUiState
 import site.webbing.audiorec.activePath
+import site.webbing.audiorec.segment.AudioLevelStore
+import site.webbing.audiorec.segment.SegmentInfo
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
@@ -88,6 +102,7 @@ fun MainScreen(
         bottomBar = {
             RecordButtonBar(
                 status = uiState.recordingStatus,
+                segmentInfo = uiState.segmentInfo,
                 onClick = onRecordButtonClick,
             )
         },
@@ -96,6 +111,7 @@ fun MainScreen(
             recordings = uiState.recordings,
             playback = uiState.playback,
             playbackEnabled = !uiState.isRecording,
+            uploadStatusByFile = uiState.uploadStatusByFile,
             onRecordingClick = onRecordingClick,
             modifier = Modifier
                 .fillMaxSize()
@@ -109,6 +125,7 @@ private fun RecordingList(
     recordings: List<RecordingFile>,
     playback: PlaybackStatus,
     playbackEnabled: Boolean,
+    uploadStatusByFile: Map<String, ImaUploadStatus>,
     onRecordingClick: (RecordingFile) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -134,6 +151,7 @@ private fun RecordingList(
                     recording = recording,
                     playback = playback,
                     enabled = playbackEnabled,
+                    uploadStatus = uploadStatusByFile[recording.name],
                     onClick = { onRecordingClick(recording) },
                 )
             }
@@ -146,6 +164,7 @@ private fun RecordingRow(
     recording: RecordingFile,
     playback: PlaybackStatus,
     enabled: Boolean,
+    uploadStatus: ImaUploadStatus?,
     onClick: () -> Unit,
 ) {
     val activePath = playback.activePath
@@ -209,6 +228,13 @@ private fun RecordingRow(
                         )
                     }
                 }
+                // 卡片右端上传状态：成功显示绿色对号，其余（失败/上传中/未上传）显示黄色问号
+                val isUploadSuccess = uploadStatus is ImaUploadStatus.Success
+                Icon(
+                    imageVector = if (isUploadSuccess) Icons.Default.Check else Icons.Default.QuestionMark,
+                    contentDescription = if (isUploadSuccess) "已上传" else "未上传",
+                    tint = if (isUploadSuccess) UploadSuccessColor else UploadPendingColor,
+                )
             }
 
             if (isActive) {
@@ -255,13 +281,30 @@ private fun RecordingRow(
 @Composable
 private fun RecordButtonBar(
     status: RecordingStatus,
+    segmentInfo: SegmentInfo?,
     onClick: () -> Unit,
 ) {
     val isRecording = status !is RecordingStatus.Idle
     val label = if (isRecording) "结束录音" else "开始录音"
     val icon = if (isRecording) Icons.Default.Stop else Icons.Default.Mic
+    val db by AudioLevelStore.level.collectAsStateWithLifecycle()
+
+    // 录音中按钮明暗闪烁：在明亮的 error 颜色与暗淡颜色之间循环往复
+    val blinkTransition = rememberInfiniteTransition(label = "recordBlink")
+    val blinkingColor by blinkTransition.animateColor(
+        initialValue = MaterialTheme.colorScheme.error,
+        targetValue = MaterialTheme.colorScheme.error.copy(alpha = 0.4f),
+        animationSpec = infiniteRepeatable(
+            animation = tween(800, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "recordBlinkColor",
+    )
     val colors = if (isRecording) {
-        ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+        ButtonDefaults.buttonColors(
+            containerColor = blinkingColor,
+            contentColor = MaterialTheme.colorScheme.onError,
+        )
     } else {
         ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
     }
@@ -272,9 +315,23 @@ private fun RecordButtonBar(
             .padding(horizontal = 24.dp, vertical = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        if (status is RecordingStatus.Paused) {
+        val statusText: String? = when (status) {
+            is RecordingStatus.Paused -> "录音已暂停，可在通知中继续"
+            is RecordingStatus.Monitoring -> {
+                val seg = segmentInfo
+                if (seg != null) "监测中·等待活动（已录 ${seg.segmentIndex} 段）"
+                else "监测中·等待活动"
+            }
+            is RecordingStatus.Recording -> {
+                val seg = segmentInfo
+                if (seg != null) "片段 #${seg.segmentIndex} · ${db.toInt()} dB"
+                else "${db.toInt()} dB"
+            }
+            RecordingStatus.Idle -> null
+        }
+        if (statusText != null) {
             Text(
-                text = "录音已暂停，可在通知中继续",
+                text = statusText,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -321,3 +378,9 @@ private fun formatMillis(ms: Int): String {
     val seconds = totalSeconds % 60
     return String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
 }
+
+/** 上传成功图标颜色（绿色）。 */
+private val UploadSuccessColor = Color(0xFF4CAF50)
+
+/** 上传未成功图标颜色（黄色），用于失败、上传中、未上传。 */
+private val UploadPendingColor = Color(0xFFFFC107)

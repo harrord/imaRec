@@ -31,11 +31,13 @@ class RecordingFileManager(private val context: Context) {
         val directory = recordingsDirectory()
         if (!directory.exists()) return emptyList()
 
-        // 录音过程中文件已经写入磁盘，但只有录音结束（状态回到 Idle）后才应出现在列表中，
+        // 录音过程中文件已经写入磁盘，但只有片段结束（进入间隔期或会话结束）后才应出现在列表中，
         // 否则用户会误以为录音已结束。这里根据全局录音状态过滤掉正在写入的文件。
+        // Monitoring（间隔期）时 MediaRecorder 已停止、无正在写入的文件，上一个片段应正常显示。
         val activeRecordingPath = when (val status = RecordingStateStore.status.value) {
             is RecordingStatus.Recording -> status.file.absolutePath
             is RecordingStatus.Paused -> status.file.absolutePath
+            is RecordingStatus.Monitoring -> null
             RecordingStatus.Idle -> null
         }
 

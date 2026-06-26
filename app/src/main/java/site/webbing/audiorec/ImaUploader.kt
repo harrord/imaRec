@@ -6,6 +6,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -55,15 +57,22 @@ class ImaUploader private constructor(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /**
+     * 上传串行化锁。自动分段模式下多个片段可能先后完成，
+     * 用 Mutex 保证一次只上传一个文件，避免并发覆盖 COS 凭证与上传状态。
+     */
+    private val uploadMutex = Mutex()
+
     private fun logD(msg: String) = Log.d(TAG, msg)
     private fun logE(msg: String, t: Throwable? = null) = Log.e(TAG, msg, t)
 
     /**
-     * 异步上传一段录音文件到 IMA 知识库。
+     * 加入上传队列，串行执行。
      * - 未开启自动上传或配置不完整时直接返回。
+     * - 多次调用会排队，前一个完成（成功/失败）后才开始下一个。
      * - 进度与结果通过 [ImaUploadStateStore] 暴露给 UI。
      */
-    fun uploadRecording(file: File) {
+    fun enqueueUpload(file: File) {
         val config = settings.config.value
         if (!config.enabled) return
         if (!config.isConfigured) {
@@ -78,24 +87,33 @@ class ImaUploader private constructor(
         // 诊断日志：把实际使用的配置打出来（KB ID 用引号包裹并标注长度，
         // 用于暴露首尾空白、不可见字符等常见复制粘贴问题）
         logD(
-            "uploadRecording start: file=${file.name} size=${file.length()}\n" +
+            "enqueueUpload start: file=${file.name} size=${file.length()}\n" +
                 "  clientId=\"${config.clientId}\" (len=${config.clientId.length}, trimmed=${config.clientId.trim().length})\n" +
                 "  apiKey provided=${config.apiKey.isNotBlank()} (len=${config.apiKey.length}, trimmed=${config.apiKey.trim().length})\n" +
                 "  knowledgeBaseId=\"${config.knowledgeBaseId}\" (len=${config.knowledgeBaseId.length}, trimmed=${config.knowledgeBaseId.trim().length})\n" +
                 "  kbIdHasLeadingOrTrailingWhitespace=${config.knowledgeBaseId != config.knowledgeBaseId.trim()}"
         )
         scope.launch {
-            try {
-                uploadInternal(file, config)
-            } catch (e: ImaException) {
-                logE("upload failed (ImaException): ${e.message}")
-                ImaUploadStateStore.set(ImaUploadStatus.Failed(file.name, e.message ?: "上传失败"))
-            } catch (e: Exception) {
-                logE("upload failed (unexpected)", e)
-                ImaUploadStateStore.set(
-                    ImaUploadStatus.Failed(file.name, "上传失败：${e.localizedMessage ?: "未知错误"}"),
-                )
+            uploadMutex.withLock {
+                uploadInternalSerialized(file, config)
             }
+        }
+    }
+
+    /** 保留旧入口名，等价于 [enqueueUpload]，兼容历史调用方。 */
+    fun uploadRecording(file: File) = enqueueUpload(file)
+
+    private suspend fun uploadInternalSerialized(file: File, config: ImaConfig) {
+        try {
+            uploadInternal(file, config)
+        } catch (e: ImaException) {
+            logE("upload failed (ImaException): ${e.message}")
+            ImaUploadStateStore.set(ImaUploadStatus.Failed(file.name, e.message ?: "上传失败"))
+        } catch (e: Exception) {
+            logE("upload failed (unexpected)", e)
+            ImaUploadStateStore.set(
+                ImaUploadStatus.Failed(file.name, "上传失败：${e.localizedMessage ?: "未知错误"}"),
+            )
         }
     }
 
@@ -163,7 +181,9 @@ class ImaUploader private constructor(
         addKnowledge(mediaId, mediaType, finalName, fileSize, cosCred, config)
         logD("Step 4 done")
 
-        ImaUploadStateStore.set(ImaUploadStatus.Success(finalName))
+        // 用磁盘文件名（fileName）而非 finalName 记录成功状态，
+        // 以便文件列表按 RecordingFile.name 精确匹配到本文件的上传结果。
+        ImaUploadStateStore.set(ImaUploadStatus.Success(fileName))
     }
 
     // ── Step 1: 重名检查 ──

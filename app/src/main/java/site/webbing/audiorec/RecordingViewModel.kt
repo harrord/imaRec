@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import site.webbing.audiorec.segment.SegmentInfo
+import site.webbing.audiorec.segment.SegmentStateStore
 
 private const val STOP_REFRESH_DELAY_MS = 300L
 
@@ -17,9 +19,15 @@ data class RecordingUiState(
     val recordings: List<RecordingFile> = emptyList(),
     val playback: PlaybackStatus = PlaybackStatus.Idle,
     val message: String? = null,
+    val segmentInfo: SegmentInfo? = null,
+    val uploadStatusByFile: Map<String, ImaUploadStatus> = emptyMap(),
 ) {
     val isRecording: Boolean
         get() = recordingStatus !is RecordingStatus.Idle
+
+    /** 当前是否处于自动分段的间隔期。 */
+    val isMonitoring: Boolean
+        get() = recordingStatus is RecordingStatus.Monitoring
 }
 
 class RecordingViewModel(application: Application) : AndroidViewModel(application) {
@@ -32,17 +40,24 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
     )
     private val imaSettings = ImaSettings.get(application)
 
+    @Suppress("UNCHECKED_CAST")
     val uiState: StateFlow<RecordingUiState> = combine(
         RecordingStateStore.status,
         recordings,
         PlaybackStateStore.status,
         message,
-    ) { status, recordingFiles, playback, currentMessage ->
+        SegmentStateStore.info,
+        ImaUploadStateStore.statusByFile,
+    ) { values ->
+        val recordingFiles = values[1] as List<RecordingFile>
+        val uploadStatusByFile = values[5] as Map<String, ImaUploadStatus>
         RecordingUiState(
-            recordingStatus = status,
+            recordingStatus = values[0] as RecordingStatus,
             recordings = recordingFiles,
-            playback = playback,
-            message = currentMessage,
+            playback = values[2] as PlaybackStatus,
+            message = values[3] as String?,
+            segmentInfo = values[4] as SegmentInfo?,
+            uploadStatusByFile = uploadStatusByFile,
         )
     }.stateIn(
         scope = viewModelScope,
