@@ -31,9 +31,18 @@ class RecordingFileManager(private val context: Context) {
         val directory = recordingsDirectory()
         if (!directory.exists()) return emptyList()
 
+        // 录音过程中文件已经写入磁盘，但只有录音结束（状态回到 Idle）后才应出现在列表中，
+        // 否则用户会误以为录音已结束。这里根据全局录音状态过滤掉正在写入的文件。
+        val activeRecordingPath = when (val status = RecordingStateStore.status.value) {
+            is RecordingStatus.Recording -> status.file.absolutePath
+            is RecordingStatus.Paused -> status.file.absolutePath
+            RecordingStatus.Idle -> null
+        }
+
         return directory
             .listFiles { file -> file.isFile && file.extension.equals("m4a", ignoreCase = true) }
             .orEmpty()
+            .filter { it.absolutePath != activeRecordingPath }
             .sortedByDescending { it.lastModified() }
             .map { file ->
                 RecordingFile(

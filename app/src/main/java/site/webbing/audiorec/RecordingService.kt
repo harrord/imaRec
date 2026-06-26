@@ -94,6 +94,9 @@ class RecordingService : Service() {
 
         try {
             recorder?.stop()
+            // 录音文件已落盘，触发 IMA 上传。
+            // ImaUploader 自带协程作用域（IO + SupervisorJob），不受 Service 销毁影响。
+            recordedFile?.let { ImaUploader.get(this).uploadRecording(it) }
         } catch (exception: RuntimeException) {
             recordedFile?.delete()
             Toast.makeText(this, "录音时间过短或保存失败，已丢弃本次录音", Toast.LENGTH_LONG).show()

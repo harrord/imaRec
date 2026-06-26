@@ -30,6 +30,7 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         scope = viewModelScope,
         onError = { showMessage(it) },
     )
+    private val imaSettings = ImaSettings.get(application)
 
     val uiState: StateFlow<RecordingUiState> = combine(
         RecordingStateStore.status,
@@ -48,6 +49,24 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = RecordingUiState(recordings = recordings.value),
     )
+
+    init {
+        // 观察 IMA 上传状态，将结果转换为用户可见的消息
+        viewModelScope.launch {
+            ImaUploadStateStore.status.collect { status ->
+                when (status) {
+                    is ImaUploadStatus.Uploading -> showMessage("正在上传录音到 IMA 知识库…")
+                    is ImaUploadStatus.Success -> {
+                        val name = imaSettings.config.value.knowledgeBaseName
+                            .ifBlank { "知识库" }
+                        showMessage("录音已上传到「$name」")
+                    }
+                    is ImaUploadStatus.Failed -> showMessage("录音上传失败：${status.message}")
+                    ImaUploadStatus.Idle -> Unit
+                }
+            }
+        }
+    }
 
     fun startRecording() {
         audioPlayer.stop()
