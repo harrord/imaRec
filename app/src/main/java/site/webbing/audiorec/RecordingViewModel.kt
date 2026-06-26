@@ -101,6 +101,11 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /** 暂停/继续录音（仅在 Recording ↔ Paused 间切换，Monitoring 忽略）。 */
+    fun togglePause() {
+        RecordingService.togglePause(getApplication())
+    }
+
     fun refreshRecordings() {
         recordings.value = fileManager.listRecordings()
     }

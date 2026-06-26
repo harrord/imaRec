@@ -390,9 +390,17 @@ private fun RecordButtonBar(
     segmentInfo: SegmentInfo?,
     onClick: () -> Unit,
 ) {
-    val isRecording = status !is RecordingStatus.Idle
-    val label = if (isRecording) "结束录音" else "开始录音"
-    val icon = if (isRecording) Icons.Default.Stop else Icons.Default.Mic
+    val isActive = status is RecordingStatus.Recording || status is RecordingStatus.Monitoring
+    val label = when (status) {
+        is RecordingStatus.Paused -> "继续录音"
+        RecordingStatus.Idle -> "开始录音"
+        else -> "结束录音"
+    }
+    val icon = when (status) {
+        is RecordingStatus.Paused -> Icons.Default.PlayArrow
+        RecordingStatus.Idle -> Icons.Default.Mic
+        else -> Icons.Default.Stop
+    }
     val db by AudioLevelStore.level.collectAsStateWithLifecycle()
 
     // 录音中按钮明暗闪烁：在明亮的 error 颜色与暗淡颜色之间循环往复
@@ -406,7 +414,8 @@ private fun RecordButtonBar(
         ),
         label = "recordBlinkColor",
     )
-    val colors = if (isRecording) {
+    // 仅在真正录音中（含监测间隔）闪烁；暂停态使用纯色，避免误导为仍在录制
+    val colors = if (isActive) {
         ButtonDefaults.buttonColors(
             containerColor = blinkingColor,
             contentColor = MaterialTheme.colorScheme.onError,

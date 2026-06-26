@@ -250,5 +250,12 @@ class RecordingService : Service() {
             }
             context.startService(intent)
         }
+
+        fun togglePause(context: Context) {
+            val intent = Intent(context, RecordingService::class.java).apply {
+                action = ACTION_TOGGLE_PAUSE
+            }
+            context.startService(intent)
+        }
     }
 }

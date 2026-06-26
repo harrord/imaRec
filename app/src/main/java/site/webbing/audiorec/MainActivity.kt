@@ -151,10 +151,10 @@ private fun ImaRecApp(
         MainScreen(
             uiState = uiState,
             onRecordButtonClick = {
-                if (uiState.isRecording) {
-                    viewModel.stopRecording()
-                } else {
-                    onStartRecordingRequest()
+                when (uiState.recordingStatus) {
+                    is RecordingStatus.Paused -> viewModel.togglePause()
+                    RecordingStatus.Idle -> onStartRecordingRequest()
+                    else -> viewModel.stopRecording()
                 }
             },
             onSettingsClick = { showSettings = true },
