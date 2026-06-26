@@ -161,6 +161,7 @@ private fun ImaRecApp(
             onRecordingClick = viewModel::onRecordingClick,
             onRecordingDelete = viewModel::deleteRecording,
             onRecordingSaveAs = onSaveAsRequest,
+            onRecordingReupload = viewModel::reuploadRecording,
             onMessageShown = viewModel::messageShown,
         )
     }

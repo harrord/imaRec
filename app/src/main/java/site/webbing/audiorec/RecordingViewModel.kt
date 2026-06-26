@@ -151,6 +151,19 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /**
+     * 重新上传指定录音文件到 IMA 知识库。
+     * 用于文件列表长按菜单中的「重新上传」操作。
+     */
+    fun reuploadRecording(recording: RecordingFile) {
+        val file = File(recording.path)
+        if (!file.exists()) {
+            showMessage("源文件不存在")
+            return
+        }
+        ImaUploader.get(getApplication()).enqueueUpload(file)
+    }
+
     fun pausePlayback() {
         audioPlayer.stop()
     }

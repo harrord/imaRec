@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
@@ -90,6 +91,7 @@ fun MainScreen(
     onRecordingClick: (RecordingFile) -> Unit,
     onRecordingDelete: (RecordingFile) -> Unit,
     onRecordingSaveAs: (RecordingFile) -> Unit,
+    onRecordingReupload: (RecordingFile) -> Unit,
     onMessageShown: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -131,6 +133,37 @@ fun MainScreen(
                     onRecordingSaveAs(recording)
                     menuRecording = null
                 },
+            )
+            // 重新上传：仅当文件上传状态为黄色问号（非 Success）时可点击；
+            // 已上传成功（绿色对号）时置灰不可点击。
+            val uploadStatus = uiState.uploadStatusByFile[recording.name]
+            val canReupload = uploadStatus !is ImaUploadStatus.Success
+            val reuploadColor = if (canReupload) {
+                MaterialTheme.colorScheme.onSurface
+            } else {
+                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+            }
+            ListItem(
+                headlineContent = {
+                    Text(
+                        text = "重新上传",
+                        color = reuploadColor,
+                    )
+                },
+                leadingContent = {
+                    Icon(
+                        imageVector = Icons.Default.CloudUpload,
+                        contentDescription = null,
+                        tint = reuploadColor,
+                    )
+                },
+                modifier = Modifier.clickable(
+                    enabled = canReupload,
+                    onClick = {
+                        onRecordingReupload(recording)
+                        menuRecording = null
+                    },
+                ),
             )
             ListItem(
                 headlineContent = { Text("删除") },
