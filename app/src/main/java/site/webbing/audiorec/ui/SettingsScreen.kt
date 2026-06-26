@@ -26,7 +26,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TimePicker
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -47,6 +49,7 @@ import site.webbing.audiorec.ImaUploader
 import site.webbing.audiorec.KnowledgeBaseOption
 import site.webbing.audiorec.segment.SegmentConfig
 import site.webbing.audiorec.segment.SegmentSettings
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -154,6 +157,28 @@ fun SettingsScreen(
                 onStepThresholdChange = { v -> segmentSettings.update { it.copy(stepStartThreshold = v) } },
                 onDbOffsetChange = { v -> segmentSettings.update { it.copy(dbCalibrationOffset = v) } },
             )
+
+            // ── 定时停止 ──
+            Text(
+                text = "定时停止",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                text = "到达设定时刻后自动结束录音，当前片段会先保存并上传。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            StopAtSection(
+                enabled = segmentConfig.stopAtEnabled,
+                hour = segmentConfig.stopAtHour,
+                minute = segmentConfig.stopAtMinute,
+                onToggle = { enabled ->
+                    segmentSettings.update { it.copy(stopAtEnabled = enabled) }
+                },
+                onTimeSelected = { h, m ->
+                    segmentSettings.update { it.copy(stopAtHour = h, stopAtMinute = m) }
+                },
+            )
         }
     }
 }
@@ -230,6 +255,82 @@ private fun AutoSegmentSection(
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun StopAtSection(
+    enabled: Boolean,
+    hour: Int,
+    minute: Int,
+    onToggle: (Boolean) -> Unit,
+    onTimeSelected: (Int, Int) -> Unit,
+) {
+    androidx.compose.foundation.layout.Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.padding(end = 16.dp)) {
+            Text(text = "启用定时停止", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = "到点自动结束录音并保存上传",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(checked = enabled, onCheckedChange = onToggle)
+    }
+
+    if (!enabled) return
+
+    var showPicker by rememberSaveable { mutableStateOf(false) }
+    val timeText = String.format(Locale.getDefault(), "%02d:%02d", hour, minute)
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "停止时间",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedButton(
+            onClick = { showPicker = true },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp),
+        ) {
+            Text(text = timeText, style = MaterialTheme.typography.titleLarge)
+        }
+    }
+
+    if (showPicker) {
+        val state = rememberTimePickerState(
+            initialHour = hour,
+            initialMinute = minute,
+            is24Hour = true,
+        )
+        AlertDialog(
+            onDismissRequest = { showPicker = false },
+            title = { Text("选择停止时间") },
+            text = {
+                androidx.compose.foundation.layout.Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    TimePicker(state = state)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onTimeSelected(state.hour, state.minute)
+                    showPicker = false
+                }) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPicker = false }) { Text("取消") }
+            },
+        )
+    }
 }
 
 @Composable

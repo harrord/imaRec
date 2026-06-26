@@ -19,6 +19,7 @@ import site.webbing.audiorec.RecordingStateStore
 import site.webbing.audiorec.segment.conditions.SilenceSustainCondition
 import site.webbing.audiorec.segment.conditions.StepCountStartCondition
 import java.io.File
+import java.util.Calendar
 
 /**
  * 自动分段协调器：串联录音引擎、分贝采样、规则引擎、文件管理与上传触发。
@@ -66,6 +67,9 @@ class SegmentController(
     private var engine: SegmentRuleEngine? = null
     private var autoSegmentEnabled = false
 
+    /** 定时停止的协程任务，到点后调用 stopSession() 结束录音会话。 */
+    private var stopTimerJob: Job? = null
+
     /** 内部阶段状态机，与 [RecordingStatus] 对应但更细粒度（区分手动暂停）。 */
     private sealed interface Phase {
         data object Idle : Phase
@@ -91,6 +95,12 @@ class SegmentController(
         acquireWakeLock()
         if (autoSegmentEnabled) stepProvider.start()
         startNewSegment(reason = null)
+        // 定时停止：到达用户设定的时刻后自动结束会话（落盘并触发上传）
+        if (config.stopAtEnabled) {
+            startStopTimer(
+                computeStopTargetMs(config.stopAtHour, config.stopAtMinute, sessionStartMs),
+            )
+        }
     }
 
     /** 用户手动暂停/继续，仅在 Recording ↔ Paused 间切换。Monitoring 状态下忽略。 */
@@ -131,6 +141,8 @@ class SegmentController(
     fun stopSession() {
         samplingJob?.cancel()
         samplingJob = null
+        stopTimerJob?.cancel()
+        stopTimerJob = null
         audioMonitor?.stop()
         audioMonitor = null
 
@@ -284,6 +296,47 @@ class SegmentController(
         currentFile = null
     }
 
+    // ── 定时停止 ──
+
+    /**
+     * 计算定时停止的目标时间戳。
+     *
+     * 以会话开始时刻 [sessionStartMs] 为基准，把今天的 [hour]:[minute] 作为候选；
+     * 若该时刻已不晚于会话开始（即今日的停止时间已过），则顺延到次日，
+     * 保证跨午夜场景下也能正确触发。
+     */
+    private fun computeStopTargetMs(hour: Int, minute: Int, sessionStartMs: Long): Long {
+        val calendar = Calendar.getInstance()
+        calendar.set(Calendar.HOUR_OF_DAY, hour)
+        calendar.set(Calendar.MINUTE, minute)
+        calendar.set(Calendar.SECOND, 0)
+        calendar.set(Calendar.MILLISECOND, 0)
+        if (calendar.timeInMillis <= sessionStartMs) {
+            calendar.add(Calendar.DAY_OF_YEAR, 1)
+        }
+        return calendar.timeInMillis
+    }
+
+    /**
+     * 启动定时停止轮询：每隔 [STOP_CHECK_INTERVAL_MS] 检查一次当前时间是否到达目标。
+     *
+     * 录音期间持有 WakeLock，CPU 不会休眠，轮询可稳定触发；
+     * 到点后调用 [stopSession]，它内部会落盘当前片段并触发上传，
+     * 满足"先保存并上传再停止"的要求。
+     */
+    private fun startStopTimer(targetMs: Long) {
+        stopTimerJob?.cancel()
+        stopTimerJob = scope.launch {
+            while (isActive && phase != Phase.Idle) {
+                delay(STOP_CHECK_INTERVAL_MS)
+                if (System.currentTimeMillis() >= targetMs) {
+                    stopSession()
+                    break
+                }
+            }
+        }
+    }
+
     // ── 引擎构建（扩展点：新增条件在此注册） ──
 
     private fun buildEngine(config: SegmentConfig): SegmentRuleEngine {
@@ -362,5 +415,6 @@ class SegmentController(
     companion object {
         private const val TAG = "SegmentController"
         private const val SAMPLE_INTERVAL_MS = 100L
+        private const val STOP_CHECK_INTERVAL_MS = 30_000L
     }
 }

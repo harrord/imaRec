@@ -22,6 +22,9 @@ import kotlinx.coroutines.flow.asStateFlow
  * @param stepStartEnabled 是否启用"步数变化"作为继续（开始新片段）条件
  * @param stepStartThreshold 步数变化阈值，累计达此值后开始新片段
  * @param dbCalibrationOffset dBFS → dB SPL 的校准偏移量，默认 90
+ * @param stopAtEnabled 是否启用定时停止：到达设定的时刻自动结束录音会话
+ * @param stopAtHour 定时停止的小时（0~23）
+ * @param stopAtMinute 定时停止的分钟（0~59）
  */
 data class SegmentConfig(
     val autoSegmentEnabled: Boolean = false,
@@ -30,6 +33,9 @@ data class SegmentConfig(
     val stepStartEnabled: Boolean = true,
     val stepStartThreshold: Int = 20,
     val dbCalibrationOffset: Int = 90,
+    val stopAtEnabled: Boolean = false,
+    val stopAtHour: Int = 18,
+    val stopAtMinute: Int = 0,
 )
 
 /**
@@ -58,6 +64,9 @@ class SegmentSettings private constructor(context: Context) {
         stepStartEnabled = prefs.getBoolean(KEY_STEP_ENABLED, true),
         stepStartThreshold = prefs.getInt(KEY_STEP_THRESHOLD, 20),
         dbCalibrationOffset = prefs.getInt(KEY_DB_OFFSET, 90),
+        stopAtEnabled = prefs.getBoolean(KEY_STOP_AT_ENABLED, false),
+        stopAtHour = prefs.getInt(KEY_STOP_AT_HOUR, 18),
+        stopAtMinute = prefs.getInt(KEY_STOP_AT_MINUTE, 0),
     )
 
     private fun save(config: SegmentConfig) {
@@ -68,6 +77,9 @@ class SegmentSettings private constructor(context: Context) {
             putBoolean(KEY_STEP_ENABLED, config.stepStartEnabled)
             putInt(KEY_STEP_THRESHOLD, config.stepStartThreshold)
             putInt(KEY_DB_OFFSET, config.dbCalibrationOffset)
+            putBoolean(KEY_STOP_AT_ENABLED, config.stopAtEnabled)
+            putInt(KEY_STOP_AT_HOUR, config.stopAtHour)
+            putInt(KEY_STOP_AT_MINUTE, config.stopAtMinute)
             apply()
         }
     }
@@ -88,5 +100,8 @@ class SegmentSettings private constructor(context: Context) {
         private const val KEY_STEP_ENABLED = "step_start_enabled"
         private const val KEY_STEP_THRESHOLD = "step_start_threshold"
         private const val KEY_DB_OFFSET = "db_calibration_offset"
+        private const val KEY_STOP_AT_ENABLED = "stop_at_enabled"
+        private const val KEY_STOP_AT_HOUR = "stop_at_hour"
+        private const val KEY_STOP_AT_MINUTE = "stop_at_minute"
     }
 }
