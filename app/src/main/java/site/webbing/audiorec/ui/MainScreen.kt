@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
@@ -212,6 +213,16 @@ private fun RecordingList(
     onRecordingLongClick: (RecordingFile) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val listState = rememberLazyListState()
+    // 录音文件按修改时间降序排列，新文件总是出现在列表顶部。
+    // 当列表顶部的文件路径变化时（新文件保存或列表刷新），滚动到顶部以确保新文件立即可见，
+    // 避免用户停留在列表中下方位置时看不到新保存的文件。
+    LaunchedEffect(recordings.firstOrNull()?.path) {
+        if (recordings.isNotEmpty()) {
+            listState.scrollToItem(0)
+        }
+    }
+
     if (recordings.isEmpty()) {
         Box(
             modifier = modifier.padding(24.dp),
@@ -225,6 +236,7 @@ private fun RecordingList(
         }
     } else {
         LazyColumn(
+            state = listState,
             modifier = modifier,
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),

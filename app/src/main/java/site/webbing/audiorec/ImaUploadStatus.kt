@@ -1,5 +1,7 @@
 package site.webbing.audiorec
 
+import android.content.Context
+import android.content.SharedPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,17 +32,23 @@ sealed interface ImaUploadStatus {
 /**
  * 全局上传状态存储，Service / Uploader 写入，UI（ViewModel）读取。
  *
- * 使用单例 [MutableStateFlow]，确保上传状态在 Activity 重建后仍可恢复。
+ * 同时维护两份状态：
+ * - [status]：最近一次上传的状态（用于 Snackbar 提示），仅在内存中。
+ * - [statusByFile]：按文件名记录的上传结果（用于文件列表卡片图标）。
+ *
+ * 其中「已成功上传的文件名集合」会持久化到 SharedPreferences，
+ * 确保 App 更新或进程重启后卡片上的绿色对号不会丢失；
+ * 失败 / 上传中 / 未上传在重启后均回退为默认的黄色问号，无需持久化。
  */
-object ImaUploadStateStore {
+class ImaUploadStateStore private constructor(context: Context) {
+    private val prefs: SharedPreferences =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
     private val _status = MutableStateFlow<ImaUploadStatus>(ImaUploadStatus.Idle)
     val status: StateFlow<ImaUploadStatus> = _status.asStateFlow()
 
-    /**
-     * 按录音文件名记录的最近一次上传状态，供文件列表逐卡片展示上传结果。
-     * 仅在内存中保留（与 [status] 一致，Activity 重建后可恢复，进程重启后清空）。
-     */
-    private val _statusByFile = MutableStateFlow<Map<String, ImaUploadStatus>>(emptyMap())
+    private val _statusByFile: MutableStateFlow<Map<String, ImaUploadStatus>> =
+        MutableStateFlow(loadPersistedSuccesses())
     val statusByFile: StateFlow<Map<String, ImaUploadStatus>> = _statusByFile.asStateFlow()
 
     fun set(status: ImaUploadStatus) {
@@ -55,5 +63,33 @@ object ImaUploadStateStore {
         if (fileName != null) {
             _statusByFile.value = _statusByFile.value + (fileName to status)
         }
+        // 仅持久化成功状态：失败/上传中/未上传在重启后均显示为黄色问号，无需保存。
+        if (status is ImaUploadStatus.Success && fileName != null) {
+            val successSet = prefs.getStringSet(KEY_SUCCESS_FILES, emptySet())
+                .orEmpty()
+                .toMutableSet()
+            if (successSet.add(fileName)) {
+                prefs.edit().putStringSet(KEY_SUCCESS_FILES, successSet).apply()
+            }
+        }
+    }
+
+    /** 从磁盘加载已成功上传的文件名，构造初始 statusByFile。 */
+    private fun loadPersistedSuccesses(): Map<String, ImaUploadStatus> =
+        prefs.getStringSet(KEY_SUCCESS_FILES, emptySet())
+            .orEmpty()
+            .associateWith { ImaUploadStatus.Success(it) }
+
+    companion object {
+        @Volatile
+        private var instance: ImaUploadStateStore? = null
+
+        fun get(context: Context): ImaUploadStateStore =
+            instance ?: synchronized(this) {
+                instance ?: ImaUploadStateStore(context.applicationContext).also { instance = it }
+            }
+
+        private const val PREFS_NAME = "ima_upload_state"
+        private const val KEY_SUCCESS_FILES = "success_files"
     }
 }

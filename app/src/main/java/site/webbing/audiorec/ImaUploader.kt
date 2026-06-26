@@ -76,7 +76,7 @@ class ImaUploader private constructor(
         val config = settings.config.value
         if (!config.enabled) return
         if (!config.isConfigured) {
-            ImaUploadStateStore.set(
+            ImaUploadStateStore.get(context).set(
                 ImaUploadStatus.Failed(
                     file.name,
                     "IMA 配置不完整，请在设置中填写 Client ID、API Key 和知识库 ID",
@@ -108,10 +108,10 @@ class ImaUploader private constructor(
             uploadInternal(file, config)
         } catch (e: ImaException) {
             logE("upload failed (ImaException): ${e.message}")
-            ImaUploadStateStore.set(ImaUploadStatus.Failed(file.name, e.message ?: "上传失败"))
+            ImaUploadStateStore.get(context).set(ImaUploadStatus.Failed(file.name, e.message ?: "上传失败"))
         } catch (e: Exception) {
             logE("upload failed (unexpected)", e)
-            ImaUploadStateStore.set(
+            ImaUploadStateStore.get(context).set(
                 ImaUploadStatus.Failed(file.name, "上传失败：${e.localizedMessage ?: "未知错误"}"),
             )
         }
@@ -151,7 +151,7 @@ class ImaUploader private constructor(
     }
 
     private fun uploadInternal(file: File, config: ImaConfig) {
-        ImaUploadStateStore.set(ImaUploadStatus.Uploading(file.name))
+        ImaUploadStateStore.get(context).set(ImaUploadStatus.Uploading(file.name))
 
         // 录音文件固定为 m4a（与 RecordingFileManager 生成规则一致）
         val fileName = file.name
@@ -183,7 +183,7 @@ class ImaUploader private constructor(
 
         // 用磁盘文件名（fileName）而非 finalName 记录成功状态，
         // 以便文件列表按 RecordingFile.name 精确匹配到本文件的上传结果。
-        ImaUploadStateStore.set(ImaUploadStatus.Success(fileName))
+        ImaUploadStateStore.get(context).set(ImaUploadStatus.Success(fileName))
     }
 
     // ── Step 1: 重名检查 ──

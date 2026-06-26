@@ -43,6 +43,7 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         onError = { showMessage(it) },
     )
     private val imaSettings = ImaSettings.get(application)
+    private val imaUploadStateStore = ImaUploadStateStore.get(application)
 
     @Suppress("UNCHECKED_CAST")
     val uiState: StateFlow<RecordingUiState> = combine(
@@ -51,7 +52,7 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         PlaybackStateStore.status,
         message,
         SegmentStateStore.info,
-        ImaUploadStateStore.statusByFile,
+        imaUploadStateStore.statusByFile,
     ) { values ->
         val recordingFiles = values[1] as List<RecordingFile>
         val uploadStatusByFile = values[5] as Map<String, ImaUploadStatus>
@@ -72,7 +73,7 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
     init {
         // 观察 IMA 上传状态，将结果转换为用户可见的消息
         viewModelScope.launch {
-            ImaUploadStateStore.status.collect { status ->
+            imaUploadStateStore.status.collect { status ->
                 when (status) {
                     is ImaUploadStatus.Uploading -> showMessage("正在上传录音到 IMA 知识库…")
                     is ImaUploadStatus.Success -> {

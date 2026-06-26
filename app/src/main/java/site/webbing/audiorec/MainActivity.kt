@@ -136,8 +136,12 @@ private fun ImaRecApp(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
     LaunchedEffect(uiState.recordingStatus) {
-        if (uiState.recordingStatus is RecordingStatus.Idle) {
-            viewModel.refreshRecordings()
+        // 录音状态变化时刷新文件列表：
+        // - Monitoring（分段结束进入间隔期）：刚完成的片段已落盘，需立即显示
+        // - Idle（会话结束）：最后一个片段已落盘，需立即显示
+        when (uiState.recordingStatus) {
+            is RecordingStatus.Monitoring, RecordingStatus.Idle -> viewModel.refreshRecordings()
+            else -> Unit
         }
     }
 
