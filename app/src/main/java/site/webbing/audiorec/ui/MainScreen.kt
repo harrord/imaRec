@@ -70,6 +70,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -627,6 +631,8 @@ private fun KnowledgeTabRow(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth(),
     ) {
+        // 选中态主色，用于下划线与文字着色；提取到 drawBehind 作用域外以便在绘制闭包中使用
+        val selectedColor = MaterialTheme.colorScheme.primary
         ScrollableTabRow(
             selectedTabIndex = selectedIndex,
             edgePadding = 0.dp,
@@ -634,32 +640,60 @@ private fun KnowledgeTabRow(
             modifier = Modifier.weight(1f),
             // 不使用默认 indicator：M3 默认实现会无条件 tabPositions[selectedTabIndex]，
             // 在 tab 数量变化帧 tabPositions 滞后于 selectedTabIndex 时会 IndexOutOfBoundsException。
-            // 选中态通过 Tab 自身的文字颜色变化体现，视觉反馈仍然清晰。
+            // 选中下划线改由每个 Tab 自身的 drawBehind 绘制，无需依赖 indicator API，更稳健。
             indicator = {},
         ) {
             activeTabs.forEachIndexed { index, tab ->
                 // 给每个 Tab 稳定 key，避免增删 Tab 时 SubcomposeLayout 复用错位
                 key(tab.id) {
+                    val selected = index == selectedIndex
                     Tab(
-                        selected = index == selectedIndex,
+                        selected = selected,
                         onClick = { onTabSelected(tab.id) },
                         text = {
                             Text(
                                 text = tab.name.ifBlank { tab.id },
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
-                            )
-                        },
-                        // 长按用 pointerInput 检测，避免 combinedClickable 与 Tab 内部 selectable 冲突；
-                        // detectTapGestures 只提供 onLongPress 时，普通点击不会被消费，仍由 Tab.onClick 处理
-                        modifier = Modifier.pointerInput(tab.id) {
-                            detectTapGestures(
-                                onLongPress = {
-                                    hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    onTabLongPress(tab)
+                                // 选中标签：主色 + 加粗；未选中：次要色 + 常规字重，形成明显区分
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
                                 },
                             )
                         },
+                        // 选中标签底部绘制圆角下划线，让用户能看出这是可点击的标签并明确当前选中项；
+                        // 未选中时不绘制，仅靠文字颜色/字重区分。
+                        // 长按用 pointerInput 检测，避免 combinedClickable 与 Tab 内部 selectable 冲突；
+                        // detectTapGestures 只提供 onLongPress 时，普通点击不会被消费，仍由 Tab.onClick 处理
+                        modifier = Modifier
+                            .drawBehind {
+                                if (selected) {
+                                    val underlineHeight = 3.dp.toPx()
+                                    // 下划线宽度取 Tab 宽度的 60%，居中显示，视觉更精致
+                                    val underlineWidth = size.width * 0.6f
+                                    val left = (size.width - underlineWidth) / 2f
+                                    drawRoundRect(
+                                        color = selectedColor,
+                                        topLeft = Offset(left, size.height - underlineHeight),
+                                        size = Size(underlineWidth, underlineHeight),
+                                        cornerRadius = CornerRadius(
+                                            underlineHeight,
+                                            underlineHeight,
+                                        ),
+                                    )
+                                }
+                            }
+                            .pointerInput(tab.id) {
+                                detectTapGestures(
+                                    onLongPress = {
+                                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        onTabLongPress(tab)
+                                    },
+                                )
+                            },
                     )
                 }
             }
