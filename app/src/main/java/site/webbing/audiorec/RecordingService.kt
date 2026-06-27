@@ -60,6 +60,7 @@ class RecordingService : Service() {
             fileManager = RecordingFileManager(this),
             uploader = ImaUploader.get(this),
             settings = SegmentSettings.get(this),
+            imaSettings = ImaSettings.get(this),
             stepProvider = StepSensorProvider.get(this),
             scope = scope,
         )

@@ -9,6 +9,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,14 +19,17 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
@@ -49,8 +53,10 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -58,6 +64,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -65,12 +72,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import android.util.Log
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import site.webbing.audiorec.ImaUploadStatus
+import site.webbing.audiorec.KnowledgeBaseOption
 import site.webbing.audiorec.PlaybackStatus
 import site.webbing.audiorec.RecordingFile
 import site.webbing.audiorec.RecordingStatus
@@ -93,11 +103,16 @@ fun MainScreen(
     onRecordingSaveAs: (RecordingFile) -> Unit,
     onRecordingReupload: (RecordingFile) -> Unit,
     onMessageShown: () -> Unit,
+    onTabSelected: (String) -> Unit,
+    onTabAdd: (KnowledgeBaseOption) -> Unit,
+    onTabRemove: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     var menuRecording by remember { mutableStateOf<RecordingFile?>(null) }
     var pendingDelete by remember { mutableStateOf<RecordingFile?>(null) }
+    var pendingRemoveTab by remember { mutableStateOf<KnowledgeBaseOption?>(null) }
+    var showAddTabDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(uiState.message) {
         val message = uiState.message ?: return@LaunchedEffect
@@ -198,11 +213,55 @@ fun MainScreen(
         )
     }
 
+    // 长按 Tab 移除确认弹窗（仅从主页移除视图，不删除服务端知识库）
+    if (pendingRemoveTab != null) {
+        val tab = pendingRemoveTab!!
+        AlertDialog(
+            onDismissRequest = { pendingRemoveTab = null },
+            title = { Text("移除知识库标签") },
+            text = {
+                Text("从主页移除「${tab.name.ifBlank { tab.id }}」？\n知识库本身不会被删除，可稍后通过「+」重新添加。")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onTabRemove(tab.id)
+                    pendingRemoveTab = null
+                }) { Text("移除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRemoveTab = null }) { Text("取消") }
+            },
+        )
+    }
+
+    // 「+」号添加 Tab 弹窗：从全量列表中过滤掉已展开的 Tab
+    if (showAddTabDialog) {
+        AddTabDialog(
+            allKnowledgeBases = uiState.allKnowledgeBases,
+            activeTabs = uiState.activeTabs,
+            onSelected = { kb ->
+                Log.d("MainScreen", "AddTabDialog onSelected: kb=${kb.id} name=${kb.name}")
+                onTabAdd(kb)
+                Log.d("MainScreen", "AddTabDialog onTabAdd returned")
+                showAddTabDialog = false
+            },
+            onDismiss = { showAddTabDialog = false },
+        )
+    }
+
     Scaffold(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text("imaRec") },
+                title = {
+                    KnowledgeTabRow(
+                        activeTabs = uiState.activeTabs,
+                        selectedKbId = uiState.selectedKbId,
+                        onTabSelected = onTabSelected,
+                        onTabLongPress = { pendingRemoveTab = it },
+                        onAddClick = { showAddTabDialog = true },
+                    )
+                },
                 actions = {
                     IconButton(onClick = onSettingsClick) {
                         Icon(
@@ -532,3 +591,147 @@ private val UploadSuccessColor = Color(0xFF4CAF50)
 
 /** 上传未成功图标颜色（黄色），用于失败、上传中、未上传。 */
 private val UploadPendingColor = Color(0xFFFFC107)
+
+/**
+ * 主页顶部的知识库选项卡栏。
+ *
+ * - 未配置任何知识库（[activeTabs] 为空）时，显示占位标题「imaRec」，不渲染 Tab 与「+」
+ * - 有 Tab 时使用 [ScrollableTabRow] 水平滑动，右侧常驻「+」入口
+ * - 单个 Tab 长按触发 [onTabLongPress]，由上层弹确认框移除
+ *
+ * 选中态与 [selectedKbId] 双向绑定：点击 Tab 调用 [onTabSelected]，由 ViewModel
+ * 同步写入 ImaSettings.knowledgeBaseId，进而驱动列表过滤与录音归属。
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun KnowledgeTabRow(
+    activeTabs: List<KnowledgeBaseOption>,
+    selectedKbId: String,
+    onTabSelected: (String) -> Unit,
+    onTabLongPress: (KnowledgeBaseOption) -> Unit,
+    onAddClick: () -> Unit,
+) {
+    if (activeTabs.isEmpty()) {
+        Text("imaRec")
+        return
+    }
+    // selectedIndex 必须严格落在 activeTabs 范围内：
+    // ScrollableTabRow 的 SubcomposeLayout 在 tab 数量变化的同一帧，
+    // 内部 tabPositions 可能滞后于 selectedTabIndex 参数，若 selectedIndex 越界会触发
+    // IndexOutOfBoundsException（M3 默认 indicator 仅检查 isNotEmpty，未检查 size）。
+    val selectedIndex = activeTabs.indexOfFirst { it.id == selectedKbId }
+        .let { if (it < 0) 0 else it.coerceAtMost(activeTabs.lastIndex) }
+    val hapticFeedback = LocalHapticFeedback.current
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        ScrollableTabRow(
+            selectedTabIndex = selectedIndex,
+            edgePadding = 0.dp,
+            divider = {},
+            modifier = Modifier.weight(1f),
+            // 不使用默认 indicator：M3 默认实现会无条件 tabPositions[selectedTabIndex]，
+            // 在 tab 数量变化帧 tabPositions 滞后于 selectedTabIndex 时会 IndexOutOfBoundsException。
+            // 选中态通过 Tab 自身的文字颜色变化体现，视觉反馈仍然清晰。
+            indicator = {},
+        ) {
+            activeTabs.forEachIndexed { index, tab ->
+                // 给每个 Tab 稳定 key，避免增删 Tab 时 SubcomposeLayout 复用错位
+                key(tab.id) {
+                    Tab(
+                        selected = index == selectedIndex,
+                        onClick = { onTabSelected(tab.id) },
+                        text = {
+                            Text(
+                                text = tab.name.ifBlank { tab.id },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
+                        // 长按用 pointerInput 检测，避免 combinedClickable 与 Tab 内部 selectable 冲突；
+                        // detectTapGestures 只提供 onLongPress 时，普通点击不会被消费，仍由 Tab.onClick 处理
+                        modifier = Modifier.pointerInput(tab.id) {
+                            detectTapGestures(
+                                onLongPress = {
+                                    hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    onTabLongPress(tab)
+                                },
+                            )
+                        },
+                    )
+                }
+            }
+        }
+        IconButton(onClick = onAddClick) {
+            Icon(
+                imageVector = Icons.Default.Add,
+                contentDescription = "添加知识库标签",
+            )
+        }
+    }
+}
+
+/**
+ * 「+」号弹出的添加 Tab 对话框。
+ *
+ * 从 [allKnowledgeBases] 中过滤掉已在主页展开的 [activeTabs]，
+ * 仅展示剩余可添加的知识库。空列表时给出提示文案。
+ */
+@Composable
+private fun AddTabDialog(
+    allKnowledgeBases: List<KnowledgeBaseOption>,
+    activeTabs: List<KnowledgeBaseOption>,
+    onSelected: (KnowledgeBaseOption) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val activeIds = activeTabs.map { it.id }.toSet()
+    val candidates = allKnowledgeBases.filter { it.id !in activeIds }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("添加知识库标签") },
+        text = {
+            if (candidates.isEmpty()) {
+                Text(
+                    text = if (allKnowledgeBases.isEmpty()) {
+                        "暂无可选知识库，请先在设置中拉取知识库列表。"
+                    } else {
+                        "所有知识库都已添加到主页。"
+                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                    items(candidates, key = { it.id }) { kb ->
+                        TextButton(
+                            onClick = { onSelected(kb) },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    text = kb.name.ifBlank { kb.id },
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = kb.id,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}

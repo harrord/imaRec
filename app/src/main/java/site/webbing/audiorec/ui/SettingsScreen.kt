@@ -114,13 +114,9 @@ fun SettingsScreen(
                 selectedId = config.knowledgeBaseId,
                 selectedName = config.knowledgeBaseName,
                 onSelected = { id, name ->
-                    settings.update { it.copy(knowledgeBaseId = id, knowledgeBaseName = name) }
+                    // 选中知识库时同时把它加入主页 Tab 并切换为当前选中，保持设置页与主页 Tab 双向绑定
+                    settings.addTabAndSelect(KnowledgeBaseOption(id = id, name = name))
                 },
-            )
-            ConfigField(
-                label = "知识库名称（可选，仅用于展示）",
-                value = config.knowledgeBaseName,
-                onValueChange = { v -> settings.update { it.copy(knowledgeBaseName = v) } },
             )
 
             if (!config.isConfigured) {
@@ -428,6 +424,7 @@ private fun KnowledgeBasePicker(
     onSelected: (id: String, name: String) -> Unit,
 ) {
     val context = LocalContext.current
+    val settings = remember { ImaSettings.get(context) }
     var showDialog by rememberSaveable { mutableStateOf(false) }
     var loading by rememberSaveable { mutableStateOf(false) }
     var error by rememberSaveable { mutableStateOf<String?>(null) }
@@ -465,7 +462,12 @@ private fun KnowledgeBasePicker(
             loading = true
             error = null
             try {
-                list = ImaUploader.get(context).listAddableKnowledgeBases()
+                val fetched = ImaUploader.get(context).listAddableKnowledgeBases()
+                list = fetched
+                // 每次拉取都用云端最新结果覆盖本地全量列表，并同步 Tab 显示名 / 选中态：
+                // - 云端改名的 KB，主页 Tab 与设置页选中态会同步刷新
+                // - 云端删除的 KB，会从 activeTabs 移除；若是当前选中 KB，则清空选中
+                settings.applyAllKnowledgeBases(fetched)
             } catch (e: Exception) {
                 error = e.message ?: "获取知识库列表失败"
             } finally {

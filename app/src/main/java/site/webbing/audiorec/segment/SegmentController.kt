@@ -13,6 +13,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import site.webbing.audiorec.ImaSettings
 import site.webbing.audiorec.ImaUploader
 import site.webbing.audiorec.RecordingFileManager
 import site.webbing.audiorec.RecordingService
@@ -46,6 +47,7 @@ class SegmentController(
     private val fileManager: RecordingFileManager,
     private val uploader: ImaUploader,
     private val settings: SegmentSettings,
+    private val imaSettings: ImaSettings,
     private val stepProvider: StepSensorProvider,
     private val scope: CoroutineScope,
 ) {
@@ -182,7 +184,10 @@ class SegmentController(
     /** 开始一个新片段：创建文件、启动 MediaRecorder、进入 Recording 阶段。 */
     private fun startNewSegment(reason: String?) {
         lastEndReason = reason
-        val file = fileManager.createRecordingFile()
+        // 取当前选中的知识库 ID 嵌入文件名，作为后续列表过滤的归属标识。
+        // 未选择知识库时为空串，文件名退化为旧格式（无 _kb 后缀），归类为「未分类」。
+        val kbId = imaSettings.config.value.knowledgeBaseId
+        val file = fileManager.createRecordingFile(kbId)
         val recorder = createMediaRecorder().apply {
             setAudioSource(MediaRecorder.AudioSource.MIC)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)

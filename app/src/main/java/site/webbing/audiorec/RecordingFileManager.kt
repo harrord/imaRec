@@ -9,25 +9,52 @@ import java.util.Locale
 
 private const val RECORDING_DIRECTORY = "recordings"
 
+/**
+ * 录音文件元数据。
+ *
+ * [kbId] 为该文件归属的知识库 ID：
+ * - 新录音创建时会把当前选中的 KB ID 写入文件名，[kbId] 从文件名解析得到
+ * - 旧文件名中没有 KB ID 时，[kbId] 为空字符串，表示「未分类」
+ */
 data class RecordingFile(
     val name: String,
     val path: String,
     val lastModifiedMillis: Long,
     val sizeBytes: Long,
+    val kbId: String = "",
 )
 
 class RecordingFileManager(private val context: Context) {
     private val fileNameFormat = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
 
-    fun createRecordingFile(): File {
+    /**
+     * 创建一个新的录音文件。
+     *
+     * 文件名格式：`REC_yyyyMMdd_HHmmss_kb<id>.m4a`
+     * 当 [kbId] 为空时（用户未选择知识库），退化为旧格式 `REC_yyyyMMdd_HHmmss.m4a`，
+     * 兼容无 Tab 状态下的录音。
+     */
+    fun createRecordingFile(kbId: String = ""): File {
         val directory = recordingsDirectory()
         if (!directory.exists()) {
             directory.mkdirs()
         }
-        return File(directory, "REC_${fileNameFormat.format(Date())}.m4a")
+        val base = "REC_${fileNameFormat.format(Date())}"
+        val name = if (kbId.isBlank()) "$base.m4a" else "${base}_kb$kbId.m4a"
+        return File(directory, name)
     }
 
-    fun listRecordings(): List<RecordingFile> {
+    /**
+     * 列出当前已落盘的录音文件。
+     *
+     * - [kbId] 为 null：返回全部录音（无 Tab 状态使用，兼容旧版）
+     * - [kbId] 为非空字符串：只返回归属该 KB 的录音（按文件名中嵌入的 KB ID 精确匹配）
+     * - [kbId] 为空字符串：返回所有「未分类」录音（文件名中没有 KB ID 的旧文件）
+     *
+     * 正在写入的文件（Recording / Paused 状态下的当前片段）会被排除，
+     * 避免用户误以为录音已结束。
+     */
+    fun listRecordings(kbId: String? = null): List<RecordingFile> {
         val directory = recordingsDirectory()
         if (!directory.exists()) return emptyList()
 
@@ -46,14 +73,36 @@ class RecordingFileManager(private val context: Context) {
             .orEmpty()
             .filter { it.absolutePath != activeRecordingPath }
             .sortedByDescending { it.lastModified() }
-            .map { file ->
-                RecordingFile(
-                    name = file.name,
-                    path = file.absolutePath,
-                    lastModifiedMillis = file.lastModified(),
-                    sizeBytes = file.length(),
-                )
+            .map { file -> file.toRecordingFile() }
+            .filter { rec ->
+                when (kbId) {
+                    null -> true
+                    "" -> rec.kbId.isBlank() // 未分类
+                    else -> rec.kbId == kbId
+                }
             }
+    }
+
+    private fun File.toRecordingFile(): RecordingFile =
+        RecordingFile(
+            name = name,
+            path = absolutePath,
+            lastModifiedMillis = lastModified(),
+            sizeBytes = length(),
+            kbId = parseKbIdFromName(name),
+        )
+
+    /**
+     * 从文件名中解析归属的 KB ID。
+     * 文件名形如 `REC_20260626_120000_kb12345.m4a`，返回 `12345`；
+     * 旧格式 `REC_20260626_120000.m4a` 返回空字符串。
+     */
+    private fun parseKbIdFromName(name: String): String {
+        if (!name.endsWith(".m4a", ignoreCase = true)) return ""
+        val stem = name.removeSuffix(".m4a")
+        val idx = stem.lastIndexOf("_kb")
+        if (idx < 0) return ""
+        return stem.substring(idx + 3)
     }
 
     private fun recordingsDirectory(): File {

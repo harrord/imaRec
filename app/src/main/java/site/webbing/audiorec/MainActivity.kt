@@ -163,6 +163,9 @@ private fun ImaRecApp(
             onRecordingSaveAs = onSaveAsRequest,
             onRecordingReupload = viewModel::reuploadRecording,
             onMessageShown = viewModel::messageShown,
+            onTabSelected = viewModel::selectTab,
+            onTabAdd = viewModel::addTabAndSelect,
+            onTabRemove = viewModel::removeTab,
         )
     }
 }
