@@ -426,7 +426,7 @@ class SegmentController(
      * - 把当前段 retag 到灵感文件夹 ID（同步文件名标签与上传目标）
      * - 不受 10 秒限制，无论时长都上传
      * - 上传目标指向灵感文件夹（[ImaUploader.enqueueUpload] 传入 overrideFolderId）
-     * - 若灵感文件夹不在主页 activeFolders 则新建并选中该 Tab
+     * - 若灵感文件夹不在主页 activeFolders 则新建该 Tab（不改变当前选中态，默认上传文件夹保持不变）
      * - 开新段继续录音，回到普通模式，反馈行显示保存结果 5 秒后恢复默认
      */
     private fun saveInspirationSegment() {
@@ -449,8 +449,8 @@ class SegmentController(
         // 落盘并上传到灵感文件夹（不受 10 秒限制）
         finalizeInspirationSegment(inspirationFolderId)
 
-        // 新建并选中灵感文件夹 Tab（若不存在），使用户打开 App 即可看到灵感录音
-        imaSettings.addFolderAndSelect(FolderOption(id = inspirationFolderId, name = folderName))
+        // 仅把灵感文件夹加入主页 Tab 供用户查看，不改变当前选中态，确保后续录音仍上传到原默认文件夹
+        imaSettings.addFolder(FolderOption(id = inspirationFolderId, name = folderName))
 
         // 开新段继续录音
         startNewSegment(reason = "灵感保存")

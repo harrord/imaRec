@@ -140,6 +140,22 @@ class ImaSettings private constructor(context: Context) {
     }
 
     /**
+     * 仅添加一个文件夹为主页 Tab，不改变当前选中态（currentFolderId 保持不变）。
+     * 若该文件夹已在 activeFolders 中，则什么都不做。
+     * 用途：灵感录音保存后把灵感文件夹加入 Tab 供用户查看，但不影响默认上传文件夹。
+     */
+    fun addFolder(folder: FolderOption) {
+        Log.d(TAG, "addFolder: folder=${folder.id} name=${folder.name}")
+        update { cfg ->
+            if (cfg.activeFolders.any { it.id == folder.id }) {
+                cfg
+            } else {
+                cfg.copy(activeFolders = cfg.activeFolders + folder)
+            }
+        }
+    }
+
+    /**
      * 从主页移除指定 Tab（不删除服务端文件夹）。
      * 若被移除的是当前选中 Tab：
      * - 若仍有其他 Tab，切换到第一个
