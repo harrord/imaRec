@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
+import android.graphics.Color
 import android.os.Build
 import android.support.v4.media.session.MediaSessionCompat
 import android.widget.RemoteViews
@@ -28,7 +30,9 @@ private const val LEGACY_CHANNEL_ID = "recording_channel"
  * 按钮点击被吞掉）。notify() 仅在状态变化、分组点击反馈、5 秒倒计时结束时触发，均为事件驱动。
  *
  * 分组按钮：切换知识库并启动 5 秒后台倒计时，结束后执行分段。点击反馈通过
- * [feedbackText] 参数在按钮行下方临时显示一行，5 秒后由调用方清除。
+ * [feedbackText] 参数在按钮行下方的固定提示行显示（高度恒定，避免触发锁屏卡片展开/收缩）。
+ * 提示行始终可见：无反馈时显示默认文案（录音中/已暂停），有反馈时显示反馈文案，
+ * 倒计时结束后由调用方传入 null 恢复默认文案。
  *
  * 按钮外观：
  * - 录音态：分组/分段绿色、暂停绿色（"暂停"文案）
@@ -184,13 +188,20 @@ class NotificationHelper(private val context: Context) {
                 }
             }
             setOnClickPendingIntent(R.id.toggle_button, togglePendingIntent())
-            // 分组反馈行：默认隐藏，有文本时显示
-            if (feedbackText.isNullOrBlank()) {
-                setViewVisibility(R.id.feedback_text, android.view.View.GONE)
-            } else {
-                setTextViewText(R.id.feedback_text, feedbackText)
-                setViewVisibility(R.id.feedback_text, android.view.View.VISIBLE)
-            }
+            // 提示行始终可见：有反馈时显示反馈文案，无反馈时显示默认文案（录音中/已暂停）。
+            // 固定高度保证卡片高度恒定，避免触发锁屏卡片展开/收缩。
+            // 文字颜色根据系统深色/浅色模式动态设置：深色背景用浅色文字，浅色背景用深色文字，
+            // 保证在各厂商通知背景下均可识别。
+            val defaultHint = if (isPaused) "人生记录已暂停" else "人生记录中..."
+            setTextViewText(R.id.feedback_text, if (feedbackText.isNullOrBlank()) defaultHint else feedbackText)
+            val isDarkTheme = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                Configuration.UI_MODE_NIGHT_YES
+            setInt(
+                R.id.feedback_text,
+                "setTextColor",
+                if (isDarkTheme) Color.parseColor("#E6FFFFFF") else Color.parseColor("#CC000000"),
+            )
+            setViewVisibility(R.id.feedback_text, android.view.View.VISIBLE)
         }
 
     private val imaSettings: ImaSettings get() = ImaSettings.get(context)

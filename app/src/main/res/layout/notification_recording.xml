@@ -77,14 +77,19 @@
             android:background="@drawable/btn_toggle_recording" />
     </LinearLayout>
 
-    <!-- 分组反馈行：默认隐藏，点击分组按钮后显示，5 秒后由后台倒计时清除 -->
+    <!-- 提示行：始终可见，固定 16dp 高度保证卡片高度恒定。
+         默认文案随录音状态切换（录音中/已暂停），点击分组/分段按钮后临时显示反馈，
+         倒计时结束后恢复默认文案。单行居中，超长省略。
+         文字颜色由代码根据系统深色/浅色模式动态设置，保证可识别性。 -->
     <TextView
         android:id="@+id/feedback_text"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
+        android:layout_height="16dp"
+        android:layout_marginTop="4dp"
         android:textSize="12sp"
-        android:textColor="#B3FFFFFF"
-        android:gravity="center_vertical"
-        android:visibility="gone" />
+        android:gravity="center"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:visibility="visible"
+        android:text="人生记录中..." />
 </LinearLayout>
