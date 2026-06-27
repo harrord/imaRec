@@ -5,14 +5,19 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import android.os.PowerManager
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import site.webbing.audiorec.segment.SegmentController
 import site.webbing.audiorec.segment.SegmentSettings
 import site.webbing.audiorec.segment.StepSensorProvider
@@ -28,10 +33,13 @@ import site.webbing.audiorec.segment.StepSensorProvider
  * 录音状态变更由 Controller 通过 [onStatusUpdate] 回调上报，本类据此更新通知与 MediaSession；
  * 回到 [RecordingStatus.Idle] 时清理前台并 stopSelf。
  *
- * 通知刷新策略：notify() 仅在状态真正变化时触发一次，不做周期性刷新。
- * 原声波动画每 200ms 重建 RemoteViews，会在用户点击过程中替换 View 层级，
- * 导致 ACTION_DOWN / ACTION_UP 落不到同一 View，按钮点击被吞掉。
- * 改为静态状态文案（"人生记录中..." / "人生记录暂停"）后，按钮点击可靠。
+ * 通知刷新策略：
+ * - 状态变化时立即重建一次（更新按钮文案/颜色/点击意图）。
+ * - 此外每 10 分钟周期性 notify() 一次，重新参与系统通知排序计算，
+ *   在其他媒体 APP（音乐软件等）退出或锁屏控件被挤下后让本 APP 控件重新回到锁屏可见位置。
+ *   依赖 [setOnlyAlertOnce]，周期性刷新不会响铃/震动，用户无感知。
+ *   间隔取 10 分钟（而非历史上放弃的 200ms 声波动画），用户点击撞上重建的概率极低。
+ *   周期性刷新需要 WakeLock 保证设备休眠时协程仍能执行；WakeLock 生命周期与刷新协程绑定。
  */
 class RecordingService : Service() {
     private lateinit var notificationHelper: NotificationHelper
@@ -39,6 +47,10 @@ class RecordingService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private var mediaSession: MediaSessionCompat? = null
+
+    // 锁屏控件周期性刷新协程（每 10 分钟 notify 一次，重新参与系统通知排序）。
+    // 仅在 Recording / Paused / Monitoring 态运行；回到 Idle 时由 stopForegroundSafely 取消。
+    private var lockscreenRefreshJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -104,6 +116,7 @@ class RecordingService : Service() {
     override fun onDestroy() {
         // 兜底：确保会话资源释放
         if (controller.isActive) controller.stopSession()
+        stopLockscreenRefresh()
         scope.cancel()
         releaseMediaSession()
         RecordingStateStore.update(RecordingStatus.Idle)
@@ -120,6 +133,7 @@ class RecordingService : Service() {
             notificationHelper.buildRecordingNotification(RecordingStatus.Idle, mediaSession?.sessionToken),
         )
         controller.startSession()
+        startLockscreenRefresh()
     }
 
     private fun stopRecording() {
@@ -128,12 +142,55 @@ class RecordingService : Service() {
     }
 
     private fun stopForegroundSafely() {
+        stopLockscreenRefresh()
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
             @Suppress("DEPRECATION")
             stopForeground(true)
         }
+    }
+
+    // ── 锁屏控件周期性刷新 ──
+
+    /**
+     * 启动周期性刷新协程：每 10 分钟 notify() 一次当前录音状态通知。
+     *
+     * 目的：让本 APP 通知重新参与系统排序计算，在其他媒体 APP 退出或锁屏控件被挤下后
+     * 让本 APP 控件重新回到锁屏可见位置。依赖 NotificationCompat.setOnlyAlertOnce，
+     * 不会响铃/震动，用户无感知。
+     *
+     * 仅在录音会话活跃期间运行（Recording / Paused / Monitoring）；回到 Idle 时协程自行退出。
+     * 需要 WakeLock 保证设备休眠时协程仍能执行；WakeLock 生命周期与本协程绑定，
+     * 协程取消/异常时通过 finally 自动释放，不会泄漏。
+     */
+    private fun startLockscreenRefresh() {
+        if (lockscreenRefreshJob?.isActive == true) return
+        lockscreenRefreshJob = scope.launch {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val wakeLock = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "imaRec:lockscreen_refresh",
+            ).apply { setReferenceCounted(false) }
+            // 单次 acquire 上限 15 分钟，略大于 10 分钟刷新间隔，
+            // 防止协程异常退出时 WakeLock 永久泄漏。
+            wakeLock.acquire(15 * 60 * 1000L)
+            try {
+                while (isActive) {
+                    delay(REFRESH_INTERVAL_MS)
+                    val status = RecordingStateStore.status.value
+                    if (status is RecordingStatus.Idle) break
+                    notificationHelper.updateRecordingNotification(status, mediaSession?.sessionToken)
+                }
+            } finally {
+                if (wakeLock.isHeld) wakeLock.release()
+            }
+        }
+    }
+
+    private fun stopLockscreenRefresh() {
+        lockscreenRefreshJob?.cancel()
+        lockscreenRefreshJob = null
     }
 
     // ── MediaSession ──
@@ -204,6 +261,11 @@ class RecordingService : Service() {
         const val ACTION_TOGGLE_PAUSE = "site.webbing.audiorec.action.TOGGLE_PAUSE"
         const val ACTION_MANUAL_SEGMENT = "site.webbing.audiorec.action.MANUAL_SEGMENT"
         const val ACTION_SWITCH_KB = "site.webbing.audiorec.action.SWITCH_KB"
+
+        // 锁屏控件周期性刷新间隔：10 分钟。
+        // 取 10 分钟（而非历史上放弃的 200ms 声波动画），用户点击撞上重建的概率极低，
+        // 且依赖 setOnlyAlertOnce 不会响铃/震动，用户无感知。
+        private const val REFRESH_INTERVAL_MS = 10L * 60 * 1000
 
         fun start(context: Context) {
             val intent = Intent(context, RecordingService::class.java).apply {
