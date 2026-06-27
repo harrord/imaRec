@@ -27,8 +27,9 @@ private const val LEGACY_CHANNEL_ID = "recording_channel"
  *   [声波 ImageView] —— [分段 Button] —— [暂停/继续 Button]
  *
  * 声波为虚假动画：由 [RecordingService] 每 [WAVE_REFRESH_MS] 生成一帧波形 Bitmap，
- * 通过 [updateWaveBitmap] 仅刷新 ImageView（不重建整个通知），避免通知频繁重建导致的卡顿
- * 和按钮 ripple 反馈被打断。
+ * 通过 [updateWaveBitmap] 刷新 ImageView。每帧仍会重建 RemoteViews 与 Notification，
+ * 但刷新频率控制在 5fps（200ms），且 Notification 字段与状态切换时保持完全一致，
+ * 避免部分安卓版本上出现按钮点击卡顿、锁屏卡片缩小再放大等兼容性问题。
  *
  * 按钮外观：
  * - 录音态：分段绿色、暂停绿色（"暂停"文案）
@@ -124,12 +125,18 @@ class NotificationHelper(private val context: Context) {
     /**
      * 刷新声波 ImageView 的 Bitmap。
      *
-     * 注意：必须复用 [buildCardViews] 重建完整 RemoteViews，而不仅是设置 ImageView。
-     * 因为 NotificationManager.notify() 替换 setCustomContentView 时会整体重 inflate，
+     * 必须复用 [buildCardViews] 重建完整 RemoteViews（而非仅 setImageViewBitmap）：
+     * NotificationManager.notify() 替换 setCustomContentView 时会整体重 inflate，
      * 若从 XML 新建 RemoteViews，按钮文本/背景会被重置为 XML 默认值（"暂停"+绿色），
-     * 导致暂停后 60ms 内"继续"文案被覆盖回去。此处传入 [isPaused] 保证每帧都
-     * 重新应用正确的按钮文案、背景与点击意图。Bitmap 生成已在后台线程完成，此处仅做
+     * 导致暂停后一帧内"继续"文案被覆盖回去。此处传入 [isPaused] 保证每帧都重新
+     * 应用正确的按钮文案、背景与点击意图。Bitmap 生成已在后台线程完成，此处仅做
      * 轻量 RemoteViews setter，性能可接受。
+     *
+     * 关键兼容性修复：此处的 Notification 构建必须与 [buildRecordingNotification]
+     * 中 Recording/Paused 分支保持完全一致的字段集合（含 setContentTitle /
+     * setContentText / setCategory / setPriority / setForegroundServiceBehavior）。
+     * 若字段缺失，部分安卓版本（MIUI/EMUI/ColorOS 等）在 notify() 重 inflate
+     * 自定义 RemoteViews 时会短暂回退到默认布局，表现为卡片缩小再放大的闪烁。
      */
     fun updateWaveBitmap(bitmap: Bitmap, isPaused: Boolean) {
         val views = buildCardViews(isPaused, bitmap)
@@ -137,9 +144,14 @@ class NotificationHelper(private val context: Context) {
             RECORDING_NOTIFICATION_ID,
             NotificationCompat.Builder(context, RECORDING_CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                .setContentTitle("imaRec")
+                .setContentText(if (isPaused) "录音已暂停" else "正在录音")
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
                 .setCustomContentView(views)
                 .setCustomBigContentView(views)
                 .build(),
@@ -212,8 +224,14 @@ class NotificationHelper(private val context: Context) {
     }
 
     companion object {
-        /** 声波动画刷新间隔（毫秒）。60ms ≈ 17fps，视觉连续且不会过载通知系统。 */
-        const val WAVE_REFRESH_MS = 60L
+        /**
+         * 声波动画刷新间隔（毫秒）。
+         *
+         * 200ms ≈ 5fps。过高的刷新频率（如 60ms/17fps）会导致 notify() 调用过载，
+         * 在部分安卓版本（尤其 13+）上触发系统限流，表现为按钮点击卡顿、
+         * 锁屏卡片短暂缩小再放大。5fps 对装饰性波形指示已足够流畅。
+         */
+        const val WAVE_REFRESH_MS = 200L
 
         /**
          * 生成第 [frameIndex] 帧的声波 Bitmap。

@@ -34,9 +34,10 @@ import site.webbing.audiorec.segment.StepSensorProvider
  * 录音状态变更由 Controller 通过 [onStatusUpdate] 回调上报，本类据此更新通知与 MediaSession；
  * 回到 [RecordingStatus.Idle] 时清理前台并 stopSelf。
  *
- * 声波动画：录音中 / 暂停态以 [NotificationHelper.WAVE_REFRESH_MS]（60ms）为间隔生成波形 Bitmap，
- * 在后台线程生成后切回主线程调用 [NotificationHelper.updateWaveBitmap] 仅刷新 ImageView，
- * 不重建整个通知，从而避免卡顿并保留按钮 ripple 反馈。
+ * 声波动画：录音中 / 暂停态以 [NotificationHelper.WAVE_REFRESH_MS]（200ms/5fps）为间隔生成
+ * 波形 Bitmap，在后台线程生成后切回主线程调用 [NotificationHelper.updateWaveBitmap] 刷新通知。
+ * 刷新频率控制在 5fps 以避免 notify() 过载；按钮点击（切换暂停/停止）时会先停止声波动画，
+ * 给状态切换 notify() 一个干净窗口，消除部分安卓版本上的点击卡顿。
  */
 class RecordingService : Service() {
     private lateinit var notificationHelper: NotificationHelper
@@ -89,8 +90,18 @@ class RecordingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START_RECORDING -> startRecording()
-            ACTION_STOP_RECORDING -> stopRecording()
-            ACTION_TOGGLE_PAUSE -> controller.togglePause()
+            ACTION_STOP_RECORDING -> {
+                // 点击停止按钮时立即停止声波动画，避免 wave notify() 与即将到来的
+                // 状态切换 notify() 竞争，消除部分安卓版本上按钮点击卡顿
+                stopWaveAnimation()
+                stopRecording()
+            }
+            ACTION_TOGGLE_PAUSE -> {
+                // 同上：切换暂停前先停止声波动画，给状态切换 notify() 一个干净的窗口；
+                // onStatusUpdate 会在新状态下重新 startWaveAnimation()
+                stopWaveAnimation()
+                controller.togglePause()
+            }
             ACTION_MANUAL_SEGMENT -> controller.manualSegment()
         }
         return START_NOT_STICKY
@@ -140,8 +151,8 @@ class RecordingService : Service() {
      * 启动声波刷新循环。录音中生成跳动帧（active=true），暂停态生成静止帧（active=false）。
      *
      * 每帧的 Bitmap 生成在 [Dispatchers.Default] 后台线程进行，避免在主线程做 Canvas 绘制；
-     * 生成完成后切回主线程调用 [NotificationHelper.updateWaveBitmap] 仅刷新 ImageView，
-     * 不重建整个通知对象，保留按钮的 ripple 点击反馈状态。
+     * 生成完成后切回主线程调用 [NotificationHelper.updateWaveBitmap] 刷新通知。
+     * 刷新间隔 200ms（5fps），在视觉流畅度与通知系统负载间取得平衡。
      */
     private fun startWaveAnimation() {
         if (waveJob?.isActive == true) return
@@ -158,7 +169,7 @@ class RecordingService : Service() {
                 val bmp: Bitmap = withContext(Dispatchers.Default) {
                     NotificationHelper.generateWaveBitmap(waveFrame, active)
                 }
-                // 主线程刷新通知 ImageView（不重建整个通知）
+                // 主线程刷新通知波形（Notification 字段与状态切换时保持一致，避免卡片闪烁）
                 notificationHelper.updateWaveBitmap(bmp, isPaused = !active)
                 waveFrame++
             }
