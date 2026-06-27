@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 录音文件存放于 getExternalFilesDir(Environment.DIRECTORY_MUSIC)/recordings/ -->
+    <external-files-path name="recordings" path="Music/recordings/" />
+</paths>

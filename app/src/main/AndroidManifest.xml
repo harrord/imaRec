@@ -30,5 +30,16 @@
             android:name=".RecordingService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- FileProvider：用于通过系统分享面板把录音文件以 content:// Uri 分享给其它 APP -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

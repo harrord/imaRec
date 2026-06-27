@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -27,6 +28,7 @@ data class RecordingUiState(
     val message: String? = null,
     val segmentInfo: SegmentInfo? = null,
     val uploadStatusByFile: Map<String, ImaUploadStatus> = emptyMap(),
+    val sharedFiles: Set<String> = emptySet(),
     val activeTabs: List<KnowledgeBaseOption> = emptyList(),
     val selectedKbId: String = "",
     val allKnowledgeBases: List<KnowledgeBaseOption> = emptyList(),
@@ -58,11 +60,13 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         message,
         SegmentStateStore.info,
         imaUploadStateStore.statusByFile,
+        imaUploadStateStore.sharedFiles,
         imaSettings.config,
     ) { values ->
         val recordingFiles = values[1] as List<RecordingFile>
         val uploadStatusByFile = values[5] as Map<String, ImaUploadStatus>
-        val cfg = values[6] as ImaConfig
+        val sharedFiles = values[6] as Set<String>
+        val cfg = values[7] as ImaConfig
         RecordingUiState(
             recordingStatus = values[0] as RecordingStatus,
             recordings = recordingFiles,
@@ -70,6 +74,7 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
             message = values[3] as String?,
             segmentInfo = values[4] as SegmentInfo?,
             uploadStatusByFile = uploadStatusByFile,
+            sharedFiles = sharedFiles,
             activeTabs = cfg.activeTabs,
             selectedKbId = cfg.knowledgeBaseId,
             allKnowledgeBases = cfg.allKnowledgeBases,
@@ -199,6 +204,41 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
         ImaUploader.get(getApplication()).enqueueUpload(file)
+    }
+
+    /**
+     * 标记某个录音文件已被分享（用户在系统分享面板点击了目标 APP 图标后回调）。
+     * 仅更新本地分享状态（黄色对勾），不触发上传。
+     */
+    fun markAsShared(fileName: String) {
+        imaUploadStateStore.markShared(fileName)
+    }
+
+    // ── 「导入 ima」确认对话框状态 ──
+
+    /** 当前待确认的分享文件，非空时 UI 显示确认对话框。 */
+    private val _shareConfirmFile = MutableStateFlow<RecordingFile?>(null)
+    val shareConfirmFile: StateFlow<RecordingFile?> = _shareConfirmFile.asStateFlow()
+
+    /**
+     * Activity 在 onResume 时调用：若 [recording] 非空（用户刚从分享面板返回），
+     * 推入 Compose 可观察状态触发确认对话框；为空则什么都不做。
+     */
+    fun triggerShareConfirmIfNeeded(recording: RecordingFile?) {
+        if (recording != null) {
+            _shareConfirmFile.value = recording
+        }
+    }
+
+    /** 用户确认已导入成功：标记文件为已分享并关闭对话框。 */
+    fun confirmShareImported() {
+        _shareConfirmFile.value?.let { markAsShared(it.name) }
+        _shareConfirmFile.value = null
+    }
+
+    /** 用户取消：直接关闭对话框，不标记。 */
+    fun cancelShareConfirm() {
+        _shareConfirmFile.value = null
     }
 
     fun pausePlayback() {

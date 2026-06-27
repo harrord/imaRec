@@ -51,6 +51,13 @@ class ImaUploadStateStore private constructor(context: Context) {
         MutableStateFlow(loadPersistedSuccesses())
     val statusByFile: StateFlow<Map<String, ImaUploadStatus>> = _statusByFile.asStateFlow()
 
+    // 已通过系统分享面板分享过的文件名集合（用于文件列表卡片右上角的黄色对勾）。
+    // 与上传状态相互独立：分享不会触发上传，上传成功后绿色对勾优先于黄色对勾显示。
+    // 持久化到 SharedPreferences，确保 App 重启后黄色对勾不丢失。
+    private val _sharedFiles: MutableStateFlow<Set<String>> =
+        MutableStateFlow(prefs.getStringSet(KEY_SHARED_FILES, emptySet()).orEmpty())
+    val sharedFiles: StateFlow<Set<String>> = _sharedFiles.asStateFlow()
+
     fun set(status: ImaUploadStatus) {
         _status.value = status
         // 同步按文件名记录：Uploading/Success/Failed 均带 fileName；Idle 无文件名，跳过。
@@ -74,6 +81,17 @@ class ImaUploadStateStore private constructor(context: Context) {
         }
     }
 
+    /**
+     * 标记某个文件已被分享（用户在系统分享面板中点击了目标 APP 图标）。
+     * 仅记录事实，不影响上传流程。重复标记同一文件是幂等的。
+     */
+    fun markShared(fileName: String) {
+        if (_sharedFiles.value.contains(fileName)) return
+        val updated = _sharedFiles.value + fileName
+        _sharedFiles.value = updated
+        prefs.edit().putStringSet(KEY_SHARED_FILES, updated).apply()
+    }
+
     /** 从磁盘加载已成功上传的文件名，构造初始 statusByFile。 */
     private fun loadPersistedSuccesses(): Map<String, ImaUploadStatus> =
         prefs.getStringSet(KEY_SUCCESS_FILES, emptySet())
@@ -91,5 +109,6 @@ class ImaUploadStateStore private constructor(context: Context) {
 
         private const val PREFS_NAME = "ima_upload_state"
         private const val KEY_SUCCESS_FILES = "success_files"
+        private const val KEY_SHARED_FILES = "shared_files"
     }
 }

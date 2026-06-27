@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -106,6 +107,7 @@ fun MainScreen(
     onRecordingDelete: (RecordingFile) -> Unit,
     onRecordingSaveAs: (RecordingFile) -> Unit,
     onRecordingReupload: (RecordingFile) -> Unit,
+    onRecordingImportIma: (RecordingFile) -> Unit,
     onMessageShown: () -> Unit,
     onTabSelected: (String) -> Unit,
     onTabAdd: (KnowledgeBaseOption) -> Unit,
@@ -143,6 +145,18 @@ fun MainScreen(
                 supportingContent = { Text("选择操作") },
             )
             HorizontalDivider()
+            // 导入 ima：调起系统分享面板，把录音分享给目标 APP（如 IMA）。
+            // 用户在分享面板点击任意 APP 图标后，文件卡片右上角会显示黄色对勾（已分享）。
+            ListItem(
+                headlineContent = { Text("导入 ima") },
+                leadingContent = {
+                    Icon(Icons.Default.IosShare, contentDescription = null)
+                },
+                modifier = Modifier.clickable {
+                    onRecordingImportIma(recording)
+                    menuRecording = null
+                },
+            )
             ListItem(
                 headlineContent = { Text("另存为") },
                 leadingContent = {
@@ -290,6 +304,7 @@ fun MainScreen(
             playback = uiState.playback,
             playbackEnabled = !uiState.isRecording,
             uploadStatusByFile = uiState.uploadStatusByFile,
+            sharedFiles = uiState.sharedFiles,
             onRecordingClick = onRecordingClick,
             onRecordingLongClick = { menuRecording = it },
             modifier = Modifier
@@ -305,6 +320,7 @@ private fun RecordingList(
     playback: PlaybackStatus,
     playbackEnabled: Boolean,
     uploadStatusByFile: Map<String, ImaUploadStatus>,
+    sharedFiles: Set<String>,
     onRecordingClick: (RecordingFile) -> Unit,
     onRecordingLongClick: (RecordingFile) -> Unit,
     modifier: Modifier = Modifier,
@@ -343,6 +359,7 @@ private fun RecordingList(
                     playback = playback,
                     enabled = playbackEnabled,
                     uploadStatus = uploadStatusByFile[recording.name],
+                    isShared = recording.name in sharedFiles,
                     onClick = { onRecordingClick(recording) },
                     onLongClick = { onRecordingLongClick(recording) },
                 )
@@ -358,6 +375,7 @@ private fun RecordingRow(
     playback: PlaybackStatus,
     enabled: Boolean,
     uploadStatus: ImaUploadStatus?,
+    isShared: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
@@ -430,12 +448,27 @@ private fun RecordingRow(
                         )
                     }
                 }
-                // 卡片右端上传状态：成功显示绿色对号，其余（失败/上传中/未上传）显示黄色问号
+                // 卡片右端状态图标（优先级：上传成功 > 已分享 > 未上传）：
+                // - 上传成功：绿色对勾
+                // - 已分享（未上传成功）：黄色对勾
+                // - 其余（失败/上传中/未上传）：黄色问号
                 val isUploadSuccess = uploadStatus is ImaUploadStatus.Success
+                val showSharedCheck = !isUploadSuccess && isShared
+                val statusIcon = when {
+                    isUploadSuccess -> Icons.Default.Check
+                    showSharedCheck -> Icons.Default.Check
+                    else -> Icons.Default.QuestionMark
+                }
+                val statusContentDescription = when {
+                    isUploadSuccess -> "已上传"
+                    showSharedCheck -> "已分享"
+                    else -> "未上传"
+                }
+                val statusTint = if (isUploadSuccess) UploadSuccessColor else UploadPendingColor
                 Icon(
-                    imageVector = if (isUploadSuccess) Icons.Default.Check else Icons.Default.QuestionMark,
-                    contentDescription = if (isUploadSuccess) "已上传" else "未上传",
-                    tint = if (isUploadSuccess) UploadSuccessColor else UploadPendingColor,
+                    imageVector = statusIcon,
+                    contentDescription = statusContentDescription,
+                    tint = statusTint,
                 )
             }
 
