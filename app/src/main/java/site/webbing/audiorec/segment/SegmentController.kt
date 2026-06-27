@@ -290,8 +290,9 @@ class SegmentController(
                     segmentRecordedMs += (now - lastSampleMs)
                 }
                 lastSampleMs = now
-                // 上传硬性限制：文件大小 ≥ 198MB 或实际录音时长 ≥ 1小时59分时立即分段，
-                // 确保每段都满足 200MB / 2 小时的上传约束（留 2MB / 1 分钟余量）
+                // 上传硬性限制：文件大小 ≥ 60MB 或实际录音时长 ≥ 1小时59分时立即分段，
+                // 60MB 远低于 200MB 上传上限，主要目的是降低大文件后台上传的 broken pipe 风险；
+                // 时长仍保留 1 分钟余量以满足 2 小时上传约束
                 val fileSize = currentFile?.length() ?: 0L
                 if (fileSize >= MAX_SEGMENT_SIZE_BYTES || segmentRecordedMs >= MAX_SEGMENT_DURATION_MS) {
                     samplingJob?.cancel()
@@ -500,8 +501,8 @@ class SegmentController(
         private const val STOP_CHECK_INTERVAL_MS = 30_000L
         /** 片段最小上传时长，低于此值的片段保留到本地但不上传。 */
         private const val MIN_SEGMENT_DURATION_MS = 10_000L
-        /** 单段文件大小上限（198MB），超过立即分段以符合 200MB 上传限制。 */
-        private const val MAX_SEGMENT_SIZE_BYTES = 198L * 1024 * 1024
+        /** 单段文件大小上限（60MB），超过立即分段以降低大文件后台上传的 broken pipe 风险。 */
+        private const val MAX_SEGMENT_SIZE_BYTES = 60L * 1024 * 1024
         /** 单段录音时长上限（1小时59分），超过立即分段以符合 2 小时上传限制。 */
         private const val MAX_SEGMENT_DURATION_MS = 119 * 60 * 1000L
     }

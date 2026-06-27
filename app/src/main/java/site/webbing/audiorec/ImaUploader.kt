@@ -261,13 +261,13 @@ class ImaUploader private constructor(
     // ── Step 3: COS 上传（PUT Object + HMAC-SHA1 签名） ──
 
     private fun uploadToCos(file: File, cred: CosCredential, contentType: String) {
-        val fileBytes = file.readBytes()
+        val fileSize = file.length()
         val hostname = "${cred.bucketName}.cos.${cred.region}.myqcloud.com"
         val pathname = "/${cred.cosKey}"
-        logD("COS PUT: https://$hostname$pathname (size=${fileBytes.size} contentType=$contentType)")
+        logD("COS PUT: https://$hostname$pathname (size=$fileSize contentType=$contentType)")
 
         val signHeaders = mapOf(
-            "content-length" to fileBytes.size.toString(),
+            "content-length" to fileSize.toString(),
             "host" to hostname,
         )
         val authorization = buildCosAuthorization(
@@ -281,28 +281,52 @@ class ImaUploader private constructor(
         )
 
         val url = URL("https://$hostname$pathname")
-        val conn = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "PUT"
-            connectTimeout = 60_000
-            readTimeout = 300_000
-            setRequestProperty("Content-Type", contentType)
-            setRequestProperty("Content-Length", fileBytes.size.toString())
-            setRequestProperty("Authorization", authorization)
-            setRequestProperty("x-cos-security-token", cred.token)
-            doOutput = true
-        }
-        try {
-            conn.outputStream.use { it.write(fileBytes) }
-            val code = conn.responseCode
-            if (code !in 200..299) {
-                val errText = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
-                logE("COS PUT failed: HTTP $code\n  error=$errText")
-                throw ImaException("COS 上传失败（HTTP $code）：$errText")
+        var lastError: Exception? = null
+        // 整体重试：流式写入大文件时，弱网/后台易出现 broken pipe 等瞬时网络异常，
+        // 重试可显著提升成功率；HTTP 业务错误（凭证失效等）不重试，直接抛出。
+        repeat(MAX_UPLOAD_ATTEMPTS) { attempt ->
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "PUT"
+                connectTimeout = 60_000
+                readTimeout = 300_000
+                setRequestProperty("Content-Type", contentType)
+                setRequestProperty("Content-Length", fileSize.toString())
+                setRequestProperty("Authorization", authorization)
+                setRequestProperty("x-cos-security-token", cred.token)
+                doOutput = true
             }
-            logD("COS PUT success: HTTP $code")
-        } finally {
-            conn.disconnect()
+            try {
+                // 流式分块写入：避免大文件全量读入内存，降低内存压力与写阻塞导致的 broken pipe 风险
+                file.inputStream().use { input ->
+                    conn.outputStream.use { output ->
+                        input.copyTo(output, UPLOAD_BUFFER_SIZE)
+                    }
+                }
+                val code = conn.responseCode
+                if (code !in 200..299) {
+                    val errText = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+                    logE("COS PUT failed: HTTP $code\n  error=$errText")
+                    throw ImaException("COS 上传失败（HTTP $code）：$errText")
+                }
+                logD("COS PUT success: HTTP $code (attempt=${attempt + 1})")
+                return
+            } catch (e: ImaException) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e
+                logE("COS PUT attempt ${attempt + 1} failed", e)
+                if (attempt < MAX_UPLOAD_ATTEMPTS - 1) {
+                    val backoffMs = UPLOAD_RETRY_BASE_MS shl attempt
+                    logD("retrying in ${backoffMs}ms...")
+                    Thread.sleep(backoffMs)
+                }
+            } finally {
+                conn.disconnect()
+            }
         }
+        throw ImaException(
+            "COS 上传失败（重试 $MAX_UPLOAD_ATTEMPTS 次仍失败）：${lastError?.localizedMessage ?: "未知错误"}",
+        )
     }
 
     // ── Step 4: 添加知识 ──
@@ -431,6 +455,12 @@ class ImaUploader private constructor(
     companion object {
         private const val TAG = "ImaUploader"
         private const val BASE_URL = "https://ima.qq.com"
+        /** COS 上传最大尝试次数（含首次），瞬时网络异常时整体重试。 */
+        private const val MAX_UPLOAD_ATTEMPTS = 3
+        /** COS 上传重试基础退避（毫秒），实际退避 = base shl attempt（2s, 4s, 8s）。 */
+        private const val UPLOAD_RETRY_BASE_MS = 2000L
+        /** COS 上传流式写入缓冲区大小（64KB），平衡内存占用与写入效率。 */
+        private const val UPLOAD_BUFFER_SIZE = 64 * 1024
 
         @Volatile
         private var instance: ImaUploader? = null
