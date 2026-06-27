@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    分段按钮背景（灵感态）：实心红色填充，8dp 圆角。
+    灵感记录模式下分段按钮切换为此背景，与普通录音态的绿色形成醒目对比，
+    让用户一眼能看出当前处于灵感记录态。
+    state_pressed 按下时切换为深红，提供点击视觉反馈。
+
+    说明：RemoteViews 不支持 AnimationDrawable 自动播放（SystemUI 进程渲染，
+    不会触发 start()），因此灵感态采用静态醒目色而非动画方案。
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#FFC62828" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#FFF44336" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+</selector>

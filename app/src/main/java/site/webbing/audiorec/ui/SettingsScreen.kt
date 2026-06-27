@@ -119,6 +119,27 @@ fun SettingsScreen(
                 },
             )
 
+            // ── 灵感目标知识库 ──
+            // 独立于默认上传 KB：双击锁屏分段按钮进入灵感模式后，灵感期间的录音保存并上传到此 KB。
+            // 仅更新灵感 KB 配置，不影响默认 KB 与主页 Tab 选中态。
+            Text(
+                text = "灵感目标知识库",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            Text(
+                text = "锁屏分段按钮双击进入灵感模式，灵感期间的录音会保存并上传到此知识库（不受 10 秒限制）。未配置时双击等同于单击，不进入灵感模式。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            KnowledgeBasePicker(
+                selectedId = config.inspirationKbId,
+                selectedName = config.inspirationKbName,
+                onSelected = { id, name ->
+                    settings.setInspirationKb(id, name)
+                },
+            )
+
             if (!config.isConfigured) {
                 Text(
                     text = "提示：需填写 Client ID、API Key 和知识库 ID 后才能自动上传录音。" +

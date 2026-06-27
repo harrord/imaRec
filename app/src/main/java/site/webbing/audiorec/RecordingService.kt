@@ -4,8 +4,11 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -104,9 +107,18 @@ class RecordingService : Service() {
         when (intent?.action) {
             ACTION_START_RECORDING -> startRecording()
             ACTION_STOP_RECORDING -> stopRecording()
-            ACTION_TOGGLE_PAUSE -> controller.togglePause()
-            ACTION_MANUAL_SEGMENT -> controller.manualSegment()
-            ACTION_SWITCH_KB -> controller.switchKnowledgeBase()
+            ACTION_TOGGLE_PAUSE -> {
+                performHapticFeedback()
+                controller.togglePause()
+            }
+            ACTION_MANUAL_SEGMENT -> {
+                performHapticFeedback()
+                controller.manualSegment()
+            }
+            ACTION_SWITCH_KB -> {
+                performHapticFeedback()
+                controller.switchKnowledgeBase()
+            }
         }
         return START_NOT_STICKY
     }
@@ -139,6 +151,17 @@ class RecordingService : Service() {
     private fun stopRecording() {
         controller.stopSession()
         // Controller 会在 stopSession 末尾 publish Idle，触发 onStatusUpdate 完成 stopForeground/stopSelf
+    }
+
+    private fun performHapticFeedback() {
+        val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val effect = VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK)
+            vibrator.vibrate(effect)
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator.vibrate(50)
+        }
     }
 
     private fun stopForegroundSafely() {

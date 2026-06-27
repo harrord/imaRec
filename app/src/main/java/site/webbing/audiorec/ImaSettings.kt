@@ -27,6 +27,8 @@ data class KnowledgeBaseOption(
  * - [enabled]：是否在录音结束后自动上传到 IMA
  * - [allKnowledgeBases]：最近一次从服务端拉取到的全部知识库列表，持久化以便离线展示
  * - [activeTabs]：主页已展开为 Tab 的知识库列表（用户可添加/移除）
+ * - [inspirationKbId] / [inspirationKbName]：灵感记录功能的目标知识库，独立于默认上传 KB，
+ *   双击锁屏分段按钮进入灵感模式后，灵感期间的录音会保存并上传到此 KB
  */
 data class ImaConfig(
     val enabled: Boolean = false,
@@ -36,6 +38,8 @@ data class ImaConfig(
     val knowledgeBaseName: String = "",
     val allKnowledgeBases: List<KnowledgeBaseOption> = emptyList(),
     val activeTabs: List<KnowledgeBaseOption> = emptyList(),
+    val inspirationKbId: String = "",
+    val inspirationKbName: String = "",
 ) {
     /** 判断配置是否完整，可发起一次上传。 */
     val isConfigured: Boolean
@@ -145,6 +149,14 @@ class ImaSettings private constructor(context: Context) {
         }
     }
 
+    /**
+     * 设置灵感记录功能的目标知识库。独立于默认上传 KB 与主页 Tab 选中态，
+     * 仅更新 [ImaConfig.inspirationKbId] / [ImaConfig.inspirationKbName]。
+     */
+    fun setInspirationKb(id: String, name: String) {
+        update { it.copy(inspirationKbId = id, inspirationKbName = name) }
+    }
+
     private fun load(): ImaConfig = ImaConfig(
         enabled = prefs.getBoolean(KEY_ENABLED, false),
         clientId = prefs.getString(KEY_CLIENT_ID, "").orEmpty(),
@@ -153,6 +165,8 @@ class ImaSettings private constructor(context: Context) {
         knowledgeBaseName = prefs.getString(KEY_KB_NAME, "").orEmpty(),
         allKnowledgeBases = readKbList(prefs.getString(KEY_ALL_KB_LIST, null)),
         activeTabs = readKbList(prefs.getString(KEY_ACTIVE_TABS, null)),
+        inspirationKbId = prefs.getString(KEY_INSPIRATION_KB_ID, "").orEmpty(),
+        inspirationKbName = prefs.getString(KEY_INSPIRATION_KB_NAME, "").orEmpty(),
     )
 
     private fun save(config: ImaConfig) {
@@ -164,6 +178,8 @@ class ImaSettings private constructor(context: Context) {
             putString(KEY_KB_NAME, config.knowledgeBaseName)
             putString(KEY_ALL_KB_LIST, writeKbList(config.allKnowledgeBases))
             putString(KEY_ACTIVE_TABS, writeKbList(config.activeTabs))
+            putString(KEY_INSPIRATION_KB_ID, config.inspirationKbId)
+            putString(KEY_INSPIRATION_KB_NAME, config.inspirationKbName)
             apply()
         }
     }
@@ -210,5 +226,7 @@ class ImaSettings private constructor(context: Context) {
         private const val KEY_KB_NAME = "knowledge_base_name"
         private const val KEY_ALL_KB_LIST = "all_kb_list"
         private const val KEY_ACTIVE_TABS = "active_tabs"
+        private const val KEY_INSPIRATION_KB_ID = "inspiration_kb_id"
+        private const val KEY_INSPIRATION_KB_NAME = "inspiration_kb_name"
     }
 }

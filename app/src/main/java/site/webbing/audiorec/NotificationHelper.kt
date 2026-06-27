@@ -180,16 +180,25 @@ class NotificationHelper(private val context: Context) {
         val isPaused = status is RecordingStatus.Paused
         val views = RemoteViews(context.packageName, R.layout.notification_recording).apply {
             val groupEnabled = !isPaused && imaSettings.config.value.activeTabs.size >= 2
+            // 灵感模式下分段按钮文案保持"灵感.."，即使进入暂停选择窗口/暂停态也维持提示
+            val segmentText = if (InspirationModeStore.active.value) "灵感.." else "分段"
+            setTextViewText(R.id.segment_button, segmentText)
             setTextViewText(R.id.toggle_button, toggleText)
             setInt(
                 R.id.toggle_button,
                 "setBackgroundResource",
                 if (isPaused) R.drawable.btn_toggle_paused else R.drawable.btn_toggle_recording,
             )
+            // 灵感模式下分段按钮保持呼吸动画，即使进入暂停选择窗口/暂停态
+            val inspirationActive = InspirationModeStore.active.value
             setInt(
                 R.id.segment_button,
                 "setBackgroundResource",
-                if (isPaused) R.drawable.btn_segment_disabled else R.drawable.btn_segment_recording,
+                when {
+                    isPaused -> R.drawable.btn_segment_disabled
+                    inspirationActive -> R.drawable.btn_segment_inspiration
+                    else -> R.drawable.btn_segment_recording
+                },
             )
             setInt(
                 R.id.group_button,
@@ -244,6 +253,9 @@ class NotificationHelper(private val context: Context) {
         RemoteViews(context.packageName, R.layout.notification_recording).apply {
             // 分组按钮：仅在录音态且主页 Tab ≥ 2 时可用；选择窗口/暂停态均置灰禁用
             val groupEnabled = !isPaused && imaSettings.config.value.activeTabs.size >= 2
+            // 灵感模式下分段按钮文案改为"灵感.."，提示用户当前为灵感记录态
+            val inspirationActive = InspirationModeStore.active.value
+            val segmentText = if (inspirationActive) "灵感.." else "分段"
             // 暂停按钮文本：
             // - Recording：暂停
             // - Paused（一直/定时）：继续
@@ -258,9 +270,11 @@ class NotificationHelper(private val context: Context) {
                     "暂停剩余 ${status.remainingMinutes} 分钟"
                 else -> "人生记录已暂停"
             }
+            setTextViewText(R.id.segment_button, segmentText)
             setTextViewText(R.id.toggle_button, toggleText)
             // 暂停态：继续按钮用琥珀色，分段 + 分组按钮置灰禁用
             // 录音态：暂停按钮用绿色，分段 + 分组按钮可用绿色
+            // 灵感模式下分段按钮用帧动画（呼吸效果），非灵感态用静态绿色
             setInt(
                 R.id.toggle_button,
                 "setBackgroundResource",
@@ -269,7 +283,11 @@ class NotificationHelper(private val context: Context) {
             setInt(
                 R.id.segment_button,
                 "setBackgroundResource",
-                if (isPaused) R.drawable.btn_segment_disabled else R.drawable.btn_segment_recording,
+                when {
+                    isPaused -> R.drawable.btn_segment_disabled
+                    inspirationActive -> R.drawable.btn_segment_inspiration
+                    else -> R.drawable.btn_segment_recording
+                },
             )
             setInt(
                 R.id.group_button,

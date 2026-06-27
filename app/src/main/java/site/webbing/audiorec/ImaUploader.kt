@@ -71,11 +71,19 @@ class ImaUploader private constructor(
      * - 未开启自动上传或配置不完整时直接返回。
      * - 多次调用会排队，前一个完成（成功/失败）后才开始下一个。
      * - 进度与结果通过 [ImaUploadStateStore] 暴露给 UI。
+     *
+     * @param overrideKbId 非空时，本次上传使用此 KB ID 而非 [ImaConfig.knowledgeBaseId]，
+     *                     用于灵感记录功能把录音上传到独立的灵感知识库。
      */
-    fun enqueueUpload(file: File) {
+    fun enqueueUpload(file: File, overrideKbId: String? = null) {
         val config = settings.config.value
-        if (!config.enabled) return
-        if (!config.isConfigured) {
+        val effectiveConfig = if (overrideKbId != null) {
+            config.copy(knowledgeBaseId = overrideKbId)
+        } else {
+            config
+        }
+        if (!effectiveConfig.enabled) return
+        if (!effectiveConfig.isConfigured) {
             ImaUploadStateStore.get(context).set(
                 ImaUploadStatus.Failed(
                     file.name,
@@ -88,14 +96,15 @@ class ImaUploader private constructor(
         // 用于暴露首尾空白、不可见字符等常见复制粘贴问题）
         logD(
             "enqueueUpload start: file=${file.name} size=${file.length()}\n" +
-                "  clientId=\"${config.clientId}\" (len=${config.clientId.length}, trimmed=${config.clientId.trim().length})\n" +
-                "  apiKey provided=${config.apiKey.isNotBlank()} (len=${config.apiKey.length}, trimmed=${config.apiKey.trim().length})\n" +
-                "  knowledgeBaseId=\"${config.knowledgeBaseId}\" (len=${config.knowledgeBaseId.length}, trimmed=${config.knowledgeBaseId.trim().length})\n" +
-                "  kbIdHasLeadingOrTrailingWhitespace=${config.knowledgeBaseId != config.knowledgeBaseId.trim()}"
+                "  clientId=\"${effectiveConfig.clientId}\" (len=${effectiveConfig.clientId.length}, trimmed=${effectiveConfig.clientId.trim().length})\n" +
+                "  apiKey provided=${effectiveConfig.apiKey.isNotBlank()} (len=${effectiveConfig.apiKey.length}, trimmed=${effectiveConfig.apiKey.trim().length})\n" +
+                "  knowledgeBaseId=\"${effectiveConfig.knowledgeBaseId}\" (len=${effectiveConfig.knowledgeBaseId.length}, trimmed=${effectiveConfig.knowledgeBaseId.trim().length})\n" +
+                "  kbIdHasLeadingOrTrailingWhitespace=${effectiveConfig.knowledgeBaseId != effectiveConfig.knowledgeBaseId.trim()}" +
+                if (overrideKbId != null) "\n  overrideKbId=$overrideKbId (灵感上传)" else ""
         )
         scope.launch {
             uploadMutex.withLock {
-                uploadInternalSerialized(file, config)
+                uploadInternalSerialized(file, effectiveConfig)
             }
         }
     }
