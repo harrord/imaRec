@@ -3,6 +3,7 @@ package site.webbing.audiorec.ui
 import androidx.compose.animation.animateColor
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -38,6 +39,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QuestionMark
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
@@ -72,6 +74,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -448,28 +451,50 @@ private fun RecordingRow(
                         )
                     }
                 }
-                // 卡片右端状态图标（优先级：上传成功 > 已分享 > 未上传）：
+                // 卡片右端状态图标（优先级：上传成功 > 上传中 > 已分享 > 未上传）：
                 // - 上传成功：绿色对勾
-                // - 已分享（未上传成功）：黄色对勾
-                // - 其余（失败/上传中/未上传）：黄色问号
+                // - 上传中：旋转的刷新图标（黄色）
+                // - 已分享（未上传成功且非上传中）：黄色对勾
+                // - 其余（失败/未上传）：黄色问号
                 val isUploadSuccess = uploadStatus is ImaUploadStatus.Success
-                val showSharedCheck = !isUploadSuccess && isShared
-                val statusIcon = when {
-                    isUploadSuccess -> Icons.Default.Check
-                    showSharedCheck -> Icons.Default.Check
-                    else -> Icons.Default.QuestionMark
+                val isUploading = uploadStatus is ImaUploadStatus.Uploading
+                val showSharedCheck = !isUploadSuccess && !isUploading && isShared
+                if (isUploading) {
+                    // 上传中：旋转的刷新图标，1 秒一圈循环
+                    val spinTransition = rememberInfiniteTransition(label = "uploadSpin")
+                    val rotation by spinTransition.animateFloat(
+                        initialValue = 0f,
+                        targetValue = 360f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(1000, easing = LinearEasing),
+                            repeatMode = RepeatMode.Restart,
+                        ),
+                        label = "uploadSpinRotation",
+                    )
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "上传中",
+                        tint = UploadPendingColor,
+                        modifier = Modifier.rotate(rotation),
+                    )
+                } else {
+                    val statusIcon = when {
+                        isUploadSuccess -> Icons.Default.Check
+                        showSharedCheck -> Icons.Default.Check
+                        else -> Icons.Default.QuestionMark
+                    }
+                    val statusContentDescription = when {
+                        isUploadSuccess -> "已上传"
+                        showSharedCheck -> "已分享"
+                        else -> "未上传"
+                    }
+                    val statusTint = if (isUploadSuccess) UploadSuccessColor else UploadPendingColor
+                    Icon(
+                        imageVector = statusIcon,
+                        contentDescription = statusContentDescription,
+                        tint = statusTint,
+                    )
                 }
-                val statusContentDescription = when {
-                    isUploadSuccess -> "已上传"
-                    showSharedCheck -> "已分享"
-                    else -> "未上传"
-                }
-                val statusTint = if (isUploadSuccess) UploadSuccessColor else UploadPendingColor
-                Icon(
-                    imageVector = statusIcon,
-                    contentDescription = statusContentDescription,
-                    tint = statusTint,
-                )
             }
 
             if (isActive) {

@@ -58,7 +58,7 @@ class RecordingService : Service() {
             updateMediaSessionState(status)
             when (status) {
                 is RecordingStatus.Recording, is RecordingStatus.Paused -> {
-                    // 状态切换时重建通知：更新状态文案、按钮文案/颜色/点击意图
+                    // 状态切换时重建通知：更新按钮文案/颜色/点击意图，并清除可能残留的分组反馈行
                     notificationHelper.updateRecordingNotification(status, mediaSession?.sessionToken)
                 }
                 is RecordingStatus.Monitoring, RecordingStatus.Idle -> {
@@ -70,6 +70,16 @@ class RecordingService : Service() {
                 stopSelf()
             }
         }
+        controller.onGroupFeedback = { text ->
+            // 分组点击反馈：在按钮行下方临时显示一行文本；null 表示清除
+            val status = RecordingStateStore.status.value
+            val token = mediaSession?.sessionToken
+            if (text == null) {
+                notificationHelper.clearGroupFeedback(status, token)
+            } else {
+                notificationHelper.showGroupFeedback(status, text, token)
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -78,6 +88,7 @@ class RecordingService : Service() {
             ACTION_STOP_RECORDING -> stopRecording()
             ACTION_TOGGLE_PAUSE -> controller.togglePause()
             ACTION_MANUAL_SEGMENT -> controller.manualSegment()
+            ACTION_SWITCH_KB -> controller.switchKnowledgeBase()
         }
         return START_NOT_STICKY
     }
@@ -186,6 +197,7 @@ class RecordingService : Service() {
         const val ACTION_STOP_RECORDING = "site.webbing.audiorec.action.STOP_RECORDING"
         const val ACTION_TOGGLE_PAUSE = "site.webbing.audiorec.action.TOGGLE_PAUSE"
         const val ACTION_MANUAL_SEGMENT = "site.webbing.audiorec.action.MANUAL_SEGMENT"
+        const val ACTION_SWITCH_KB = "site.webbing.audiorec.action.SWITCH_KB"
 
         fun start(context: Context) {
             val intent = Intent(context, RecordingService::class.java).apply {

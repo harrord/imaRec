@@ -20,18 +20,19 @@ private const val LEGACY_CHANNEL_ID = "recording_channel"
  * 录音通知构建器。
  *
  * 录音中 / 暂停态使用自定义 RemoteViews 三部分卡片：
- *   [状态 TextView] —— [分段 Button] —— [暂停/继续 Button]
+ *   [分组 Button] —— [分段 Button] —— [暂停/继续 Button]
  *
- * 状态文案仅在状态切换时通过 [updateRecordingNotification] 更新：
- *   - 录音态显示 "人生记录中..."
- *   - 暂停态显示 "人生记录暂停"
+ * 状态文案已移除，录音/暂停状态仅靠按钮体现（分段置灰=暂停，暂停↔继续文字切换）。
  * 不再做周期性 notify() 刷新（原声波动画每 200ms 重建 RemoteViews，
  * 会在用户点击过程中替换 View 层级，导致 ACTION_DOWN/UP 落不到同一 View，
- * 按钮点击被吞掉）。现在 notify() 仅在状态真正变化时触发一次，按钮点击可靠。
+ * 按钮点击被吞掉）。notify() 仅在状态变化、分组点击反馈、5 秒倒计时结束时触发，均为事件驱动。
+ *
+ * 分组按钮：切换知识库并启动 5 秒后台倒计时，结束后执行分段。点击反馈通过
+ * [feedbackText] 参数在按钮行下方临时显示一行，5 秒后由调用方清除。
  *
  * 按钮外观：
- * - 录音态：分段绿色、暂停绿色（"暂停"文案）
- * - 暂停态：分段灰色禁用、继续琥珀色（"继续"文案）
+ * - 录音态：分组/分段绿色、暂停绿色（"暂停"文案）
+ * - 暂停态：分组/分段灰色禁用、继续琥珀色（"继续"文案）
  * 尺寸固定 72x36dp，13sp 加粗白字，8dp 圆角实心填充。
  */
 class NotificationHelper(private val context: Context) {
@@ -59,12 +60,15 @@ class NotificationHelper(private val context: Context) {
     }
 
     /**
-     * 构建录音通知。仅在状态变化时调用；notify() 不再周期性触发，
+     * 构建录音通知。仅在状态变化或分组反馈更新时调用；notify() 不再周期性触发，
      * 避免按钮点击事件被 View 重建吞掉。
+     *
+     * @param feedbackText 分组反馈行文本，null 或空串表示隐藏反馈行
      */
     fun buildRecordingNotification(
         status: RecordingStatus,
         mediaSessionToken: MediaSessionCompat.Token? = null,
+        feedbackText: String? = null,
     ): Notification {
         createChannel()
 
@@ -81,7 +85,7 @@ class NotificationHelper(private val context: Context) {
         when (status) {
             is RecordingStatus.Recording, is RecordingStatus.Paused -> {
                 val isPaused = status is RecordingStatus.Paused
-                val views = buildCardViews(isPaused)
+                val views = buildCardViews(isPaused, feedbackText)
                 builder.setContentText(if (isPaused) "录音已暂停" else "正在录音")
                 builder.setCustomContentView(views)
                 builder.setCustomBigContentView(views)
@@ -107,7 +111,7 @@ class NotificationHelper(private val context: Context) {
     }
 
     /**
-     * 状态变化时重建完整通知。这是唯一的 notify() 调用入口，
+     * 状态变化时重建完整通知。这是唯一的 notify() 调用入口（分组反馈更新除外），
      * 不再有周期性刷新，因此按钮点击事件不会被 View 重建打断。
      */
     fun updateRecordingNotification(
@@ -116,19 +120,42 @@ class NotificationHelper(private val context: Context) {
     ) {
         NotificationManagerCompat.from(context).notify(
             RECORDING_NOTIFICATION_ID,
-            buildRecordingNotification(status, mediaSessionToken),
+            buildRecordingNotification(status, mediaSessionToken, null),
+        )
+    }
+
+    /**
+     * 更新分组反馈行：显示反馈文本。用于点击分组按钮后展示当前选中知识库。
+     * 仅在 Recording / Paused 态有效，其他态忽略。
+     */
+    fun showGroupFeedback(status: RecordingStatus, text: String, mediaSessionToken: MediaSessionCompat.Token? = null) {
+        if (status !is RecordingStatus.Recording && status !is RecordingStatus.Paused) return
+        NotificationManagerCompat.from(context).notify(
+            RECORDING_NOTIFICATION_ID,
+            buildRecordingNotification(status, mediaSessionToken, text),
+        )
+    }
+
+    /**
+     * 清除分组反馈行。用于 5 秒倒计时结束或被取消后隐藏反馈文本。
+     */
+    fun clearGroupFeedback(status: RecordingStatus, mediaSessionToken: MediaSessionCompat.Token? = null) {
+        if (status !is RecordingStatus.Recording && status !is RecordingStatus.Paused) return
+        NotificationManagerCompat.from(context).notify(
+            RECORDING_NOTIFICATION_ID,
+            buildRecordingNotification(status, mediaSessionToken, null),
         )
     }
 
     // ── RemoteViews 构建 ──
 
-    private fun buildCardViews(isPaused: Boolean): RemoteViews =
+    private fun buildCardViews(isPaused: Boolean, feedbackText: String? = null): RemoteViews =
         RemoteViews(context.packageName, R.layout.notification_recording).apply {
-            // 状态文案：录音态显示"人生记录中..."，暂停态显示"人生记录暂停"
-            setTextViewText(R.id.status_text, if (isPaused) "人生记录暂停" else "人生记录中...")
+            // 分组按钮：仅在录音态且主页 Tab ≥ 2 时可用；否则与分段按钮一起置灰禁用
+            val groupEnabled = !isPaused && imaSettings.config.value.activeTabs.size >= 2
             setTextViewText(R.id.toggle_button, if (isPaused) "继续" else "暂停")
-            // 暂停态：继续按钮用琥珀色，分段按钮置灰禁用
-            // 录音态：暂停按钮用绿色，分段按钮可用绿色
+            // 暂停态：继续按钮用琥珀色，分段 + 分组按钮置灰禁用
+            // 录音态：暂停按钮用绿色，分段 + 分组按钮可用绿色
             setInt(
                 R.id.toggle_button,
                 "setBackgroundResource",
@@ -139,14 +166,34 @@ class NotificationHelper(private val context: Context) {
                 "setBackgroundResource",
                 if (isPaused) R.drawable.btn_segment_disabled else R.drawable.btn_segment_recording,
             )
-            // 暂停态禁用分段按钮的点击（仍显示文案，但不响应）
+            setInt(
+                R.id.group_button,
+                "setBackgroundResource",
+                if (groupEnabled) R.drawable.btn_segment_recording else R.drawable.btn_segment_disabled,
+            )
+            // 暂停态或无可切换知识库时，禁用分段 + 分组按钮的点击（仍显示文案，但不响应）
             if (isPaused) {
                 setOnClickPendingIntent(R.id.segment_button, null)
+                setOnClickPendingIntent(R.id.group_button, null)
             } else {
                 setOnClickPendingIntent(R.id.segment_button, segmentPendingIntent())
+                if (groupEnabled) {
+                    setOnClickPendingIntent(R.id.group_button, groupPendingIntent())
+                } else {
+                    setOnClickPendingIntent(R.id.group_button, null)
+                }
             }
             setOnClickPendingIntent(R.id.toggle_button, togglePendingIntent())
+            // 分组反馈行：默认隐藏，有文本时显示
+            if (feedbackText.isNullOrBlank()) {
+                setViewVisibility(R.id.feedback_text, android.view.View.GONE)
+            } else {
+                setTextViewText(R.id.feedback_text, feedbackText)
+                setViewVisibility(R.id.feedback_text, android.view.View.VISIBLE)
+            }
         }
+
+    private val imaSettings: ImaSettings get() = ImaSettings.get(context)
 
     // ── PendingIntent ──
 
@@ -169,6 +216,18 @@ class NotificationHelper(private val context: Context) {
         return PendingIntent.getService(
             context,
             3,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    private fun groupPendingIntent(): PendingIntent {
+        val intent = Intent(context, RecordingService::class.java).apply {
+            action = RecordingService.ACTION_SWITCH_KB
+        }
+        return PendingIntent.getService(
+            context,
+            4,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )

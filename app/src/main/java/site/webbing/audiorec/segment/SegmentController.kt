@@ -54,6 +54,12 @@ class SegmentController(
     /** 录音状态变化回调，Service 用于同步更新前台通知与 MediaSession。 */
     var onStatusUpdate: ((RecordingStatus) -> Unit)? = null
 
+    /**
+     * 分组按钮反馈回调：非空文本表示在通知按钮行下方临时显示一行；
+     * null 表示清除该行。Service 据此调用 NotificationHelper 更新通知。
+     */
+    var onGroupFeedback: ((String?) -> Unit)? = null
+
     private var mediaRecorder: MediaRecorder? = null
     private var audioMonitor: AudioMonitor? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -78,6 +84,18 @@ class SegmentController(
 
     /** 定时停止的协程任务，到点后调用 stopSession() 结束录音会话。 */
     private var stopTimerJob: Job? = null
+
+    /**
+     * 分组按钮的 5 秒倒计时任务。每次点击分组按钮都会取消上一个并重启，
+     * 到点后清除通知反馈行并执行 [manualSegment]（上传当前段 + 开新段）。
+     */
+    private var kbSwitchJob: Job? = null
+
+    /**
+     * 分段按钮反馈的清除任务。点击分段按钮后显示反馈行（当前片段保存到的知识库），
+     * 5 秒后由此任务清除。与 [kbSwitchJob] 互斥：分段点击取消分组倒计时，分组点击取消本任务。
+     */
+    private var segmentFeedbackJob: Job? = null
 
     /** 内部阶段状态机，与 [RecordingStatus] 对应但更细粒度（区分手动暂停）。 */
     private sealed interface Phase {
@@ -120,6 +138,11 @@ class SegmentController(
             Phase.Recording -> {
                 try {
                     recorder.pause()
+                    // 暂停时取消分组按钮可能挂起的 5 秒倒计时（手动操作优先，取消待执行分段）
+                    kbSwitchJob?.cancel()
+                    kbSwitchJob = null
+                    segmentFeedbackJob?.cancel()
+                    segmentFeedbackJob = null
                     samplingJob?.cancel()
                     samplingJob = null
                     phase = Phase.Paused
@@ -151,13 +174,102 @@ class SegmentController(
      *
      * 仅在 Recording 阶段有效；Paused / Monitoring / Idle 忽略，避免与暂停或间隔期逻辑冲突。
      * 与自动分段的 [enterMonitoring] 不同：手动分段不进入间隔期监测，直接开始下一段录音。
+     *
+     * 同时取消分组按钮可能挂起的 5 秒倒计时（用户手动操作优先，取消由分组触发的待执行分段）。
+     * 手动分段不重打当前段的 KB 标签——文件名保持创建时嵌入的 KB，维持原归属。
+     *
+     * 分段完成后，在通知卡片反馈行显示当前片段保存到的知识库名称，5 秒后自动消失。
+     * 显示方式与分组按钮点击后的反馈一致（复用同一反馈行 [onGroupFeedback]）。
      */
     fun manualSegment() {
         if (phase != Phase.Recording) return
+        kbSwitchJob?.cancel()
+        kbSwitchJob = null
+        segmentFeedbackJob?.cancel()
+        segmentFeedbackJob = null
+        manualSegmentInternal(retagKbId = null)
+        // 分段完成后显示反馈行：当前片段保存到的知识库。startNewSegment 内部会
+        // 先 publishStatus(Recording) 触发一次无反馈行的通知重建，此处再以反馈文本
+        // 重建一次，反馈行最终可见。
+        val kbName = currentKbName()
+        onGroupFeedback?.invoke("录音片段已保存到「$kbName」")
+        segmentFeedbackJob = scope.launch {
+            delay(SEGMENT_FEEDBACK_DURATION_MS)
+            onGroupFeedback?.invoke(null)
+        }
+    }
+
+    /**
+     * 分段的实际执行体：落盘当前段 + 开新段。
+     *
+     * @param retagKbId 非空时，把当前段文件名中的 KB ID 重写为此值后再上传。
+     *                  仅分组按钮 5 秒倒计时到点这条路径传入（切到新 KB 后，让当前段归到新 KB）；
+     *                  其他路径传 null，文件名保持创建时的 KB 不变。
+     */
+    private fun manualSegmentInternal(retagKbId: String?) {
         samplingJob?.cancel()
         samplingJob = null
-        finalizeAndUploadCurrent()
+        finalizeAndUploadCurrent(retagKbId)
         startNewSegment(reason = "手动分段")
+    }
+
+    /**
+     * 获取当前选中知识库的显示名称，用于分段后反馈提示当前片段归属。
+     * 未选择知识库或名称为空时返回"未分类"。
+     */
+    private fun currentKbName(): String {
+        val config = imaSettings.config.value
+        return config.activeTabs.firstOrNull { it.id == config.knowledgeBaseId }
+            ?.name
+            ?.takeIf { it.isNotBlank() }
+            ?: "未分类"
+    }
+
+    /**
+     * 切换知识库并启动 5 秒后台倒计时，到点后执行分段。
+     *
+     * 行为：
+     * - 在主页已展开 Tab（activeTabs）之间循环切换到下一个知识库
+     * - 每次点击都弹 Toast 提示当前选中 KB 与 5 秒后自动分段
+     * - 在通知按钮行下方临时显示反馈行（锁屏可见，弥补 Toast 在锁屏可能不弹的限制）
+     * - 5 秒内再次点击：取消上一个倒计时、切换到下一个 KB、重启倒计时
+     * - 5 秒内无再点击：清除反馈行并执行分段（上传当前段 + 用新 KB 开新段）；
+     *   到点时把当前段文件名重打为切换后的新 KB，使落盘归属与上传目标一致
+     *
+     * 仅在 Recording 阶段且 activeTabs ≥ 2 时有效；其他态或无可切换 KB 时忽略。
+     */
+    fun switchKnowledgeBase() {
+        if (phase != Phase.Recording) return
+        val tabs = imaSettings.config.value.activeTabs
+        if (tabs.size < 2) return
+        val currentId = imaSettings.config.value.knowledgeBaseId
+        val currentIndex = tabs.indexOfFirst { it.id == currentId }
+        val nextIndex = if (currentIndex < 0) 0 else (currentIndex + 1) % tabs.size
+        val next = tabs[nextIndex]
+        imaSettings.selectTab(next.id)
+
+        Toast.makeText(
+            service,
+            "连续点击以切换保存的知识库。当前选择的「${next.name}」，5 秒后自动执行分段",
+            Toast.LENGTH_SHORT,
+        ).show()
+        onGroupFeedback?.invoke("当前选中：${next.name}，5 秒后自动分段")
+
+        // 重启 5 秒倒计时：到点后清除反馈行并执行分段
+        kbSwitchJob?.cancel()
+        // 分组按钮接管反馈行，取消分段按钮可能挂起的反馈清除任务
+        segmentFeedbackJob?.cancel()
+        segmentFeedbackJob = null
+        kbSwitchJob = scope.launch {
+            delay(KB_SWITCH_DELAY_MS)
+            onGroupFeedback?.invoke(null)
+            // 倒计时期间状态可能变化（暂停/停止会取消本协程，这里只是防御性检查）
+            if (phase != Phase.Recording) return@launch
+            // 把当前段（在旧 KB 下开始录的）重打为切换后的新 KB，
+            // 使落盘文件名标签与上传目标、本地列表归属一致
+            val newKbId = imaSettings.config.value.knowledgeBaseId
+            manualSegmentInternal(retagKbId = newKbId)
+        }
     }
 
     /** 结束整个会话：落盘当前片段并上传，释放所有资源。 */
@@ -166,6 +278,10 @@ class SegmentController(
         samplingJob = null
         stopTimerJob?.cancel()
         stopTimerJob = null
+        kbSwitchJob?.cancel()
+        kbSwitchJob = null
+        segmentFeedbackJob?.cancel()
+        segmentFeedbackJob = null
         audioMonitor?.stop()
         audioMonitor = null
 
@@ -231,6 +347,12 @@ class SegmentController(
     private fun enterMonitoring(reason: String) {
         samplingJob?.cancel()
         samplingJob = null
+        // 自动分段进入间隔期时，取消分组按钮可能挂起的 5 秒倒计时，避免与间隔期逻辑冲突
+        kbSwitchJob?.cancel()
+        kbSwitchJob = null
+        // 间隔期通知不再使用卡片反馈行，取消分段按钮可能挂起的反馈清除任务
+        segmentFeedbackJob?.cancel()
+        segmentFeedbackJob = null
         finalizeAndUploadCurrent()
 
         val offset = settings.config.value.dbCalibrationOffset
@@ -320,8 +442,14 @@ class SegmentController(
         }
     }
 
-    /** 停止 MediaRecorder 并把当前文件加入上传队列。过短的片段保留到本地但不上传。 */
-    private fun finalizeAndUploadCurrent() {
+    /**
+     * 停止 MediaRecorder 并把当前文件加入上传队列。过短的片段保留到本地但不上传。
+     *
+     * @param retagKbId 非空时，在 recorder.stop() 关闭文件后，把文件名中的 KB ID
+     *                  重写为此值（rename 磁盘文件）再读时长/入队上传。仅分组按钮
+     *                  5 秒倒计时到点这条路径传入；其他路径传 null 保持原文件名。
+     */
+    private fun finalizeAndUploadCurrent(retagKbId: String? = null) {
         val file = currentFile
         val recorder = mediaRecorder
         try {
@@ -335,18 +463,21 @@ class SegmentController(
             mediaRecorder = null
         }
         if (file != null && file.exists() && file.length() > 0) {
-            val durationMs = getSegmentDurationMs(file)
+            // 分组到点触发分段时，把当前段文件名中的 KB ID 重写为切换后的新 KB，
+            // 同步本地列表归属与上传目标。必须在 recorder.stop() 关闭文件之后执行。
+            val finalFile = if (retagKbId != null) fileManager.retagKbId(file, retagKbId) else file
+            val durationMs = getSegmentDurationMs(finalFile)
             if (durationMs < MIN_SEGMENT_DURATION_MS) {
                 // 10 秒以内的片段保留到本地，但不上传。
                 // 覆盖手动停止、手动分段、自动分段、定时停止等所有产生文件的路径。
-                Log.d(TAG, "skip upload for short segment: ${file.name} duration=${durationMs}ms")
+                Log.d(TAG, "skip upload for short segment: ${finalFile.name} duration=${durationMs}ms")
                 Toast.makeText(
                     service,
                     "录音时长不足 10 秒，已保存但不上传",
                     Toast.LENGTH_SHORT,
                 ).show()
             } else {
-                uploader.enqueueUpload(file)
+                uploader.enqueueUpload(finalFile)
             }
         }
         currentFile = null
@@ -499,6 +630,10 @@ class SegmentController(
         private const val TAG = "SegmentController"
         private const val SAMPLE_INTERVAL_MS = 100L
         private const val STOP_CHECK_INTERVAL_MS = 30_000L
+        /** 分组按钮点击后等待再次点击的窗口期，期间无新点击则自动执行分段。 */
+        private const val KB_SWITCH_DELAY_MS = 5_000L
+        /** 分段按钮点击后反馈行显示时长，到时自动清除。 */
+        private const val SEGMENT_FEEDBACK_DURATION_MS = 5_000L
         /** 片段最小上传时长，低于此值的片段保留到本地但不上传。 */
         private const val MIN_SEGMENT_DURATION_MS = 10_000L
         /** 单段文件大小上限（60MB），超过立即分段以降低大文件后台上传的 broken pipe 风险。 */

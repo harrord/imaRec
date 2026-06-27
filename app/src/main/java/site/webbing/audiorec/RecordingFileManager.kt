@@ -45,6 +45,32 @@ class RecordingFileManager(private val context: Context) {
     }
 
     /**
+     * 把文件名中嵌入的 KB ID 重写为 [newKbId] 并 rename 磁盘文件。
+     *
+     * 用途：分组按钮 5 秒倒计时到点触发分段时，把当前段（在旧 KB 下开始录的）
+     * 归到切换后的新 KB——同步文件名标签与上传目标，使本地列表与上传目标一致。
+     *
+     * - 旧文件名形如 `REC_xxx_kbAAA.m4a` → 重命名为 `REC_xxx_kbBBB.m4a`
+     * - 旧文件名为「未分类」格式（无 `_kb` 后缀）且 [newKbId] 非空时，补上 `_kb<id>` 后缀
+     * - [newKbId] 为空时，剥离 `_kb` 后缀退化为「未分类」格式
+     * - 文件不存在或 rename 失败（目标已存在/IO 异常）时返回原 [file]，调用方继续用旧文件上传
+     *
+     * 必须在 MediaRecorder.stop() 关闭文件之后调用，避免写入未结束。
+     */
+    fun retagKbId(file: File, newKbId: String): File {
+        if (!file.exists()) return file
+        val oldName = file.name
+        if (!oldName.endsWith(".m4a", ignoreCase = true)) return file
+        val stem = oldName.removeSuffix(".m4a")
+        val idx = stem.lastIndexOf("_kb")
+        val base = if (idx >= 0) stem.substring(0, idx) else stem
+        val newName = if (newKbId.isBlank()) "$base.m4a" else "${base}_kb$newKbId.m4a"
+        if (newName == oldName) return file
+        val target = File(file.parentFile, newName)
+        return if (file.renameTo(target)) target else file
+    }
+
+    /**
      * 列出当前已落盘的录音文件。
      *
      * - [kbId] 为 null：返回全部录音（无 Tab 状态使用，兼容旧版）
