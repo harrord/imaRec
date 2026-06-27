@@ -60,6 +60,13 @@ class SegmentController(
      */
     var onGroupFeedback: ((String?) -> Unit)? = null
 
+    /**
+     * 暂停状态反馈回调：用于通知按钮行下方提示行与按钮文本的同步刷新。
+     * 参数分别为 [toggleText] 暂停按钮文本（"暂停"/"继续"）与 [hintText] 提示行文案。
+     * Service 据此调用 NotificationHelper 更新通知。
+     */
+    var onPauseFeedback: ((toggleText: String, hintText: String) -> Unit)? = null
+
     private var mediaRecorder: MediaRecorder? = null
     private var audioMonitor: AudioMonitor? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -85,6 +92,18 @@ class SegmentController(
     /** 定时停止的协程任务，到点后调用 stopSession() 结束录音会话。 */
     private var stopTimerJob: Job? = null
 
+    /** 暂停选择窗口的 5 秒倒计时任务，到点后按点击次数进入对应暂停态。 */
+    private var pauseSelectJob: Job? = null
+
+    /** 定时暂停的每分钟递减任务，到 0 后自动恢复录音。 */
+    private var pauseTimerJob: Job? = null
+
+    /** 暂停选择窗口内的累计点击次数，用于 4 档循环映射。 */
+    private var pauseSelectCount = 0
+
+    /** 定时暂停的剩余分钟数，每分钟递减，到 0 自动恢复。 */
+    private var pauseRemainingMinutes = 0
+
     /**
      * 分组按钮的 5 秒倒计时任务。每次点击分组按钮都会取消上一个并重启，
      * 到点后清除通知反馈行并执行 [manualSegment]（上传当前段 + 开新段）。
@@ -102,12 +121,20 @@ class SegmentController(
         data object Idle : Phase
         data object Recording : Phase
         data object Monitoring : Phase
-        data object Paused : Phase
+        /** 一直暂停：MediaRecorder 已 pause，需用户点继续恢复。 */
+        data object PausedForever : Phase
+        /** 定时暂停：MediaRecorder 已 pause，倒计时到 0 自动恢复。 */
+        data object PausedTimed : Phase
+        /**
+         * 暂停选择窗口：用户点击暂停按钮后的 5 秒内，录音仍在继续（未真正 pause），
+         * 按点击次数循环选择暂停模式。窗口结束按所选模式进入 PausedForever / PausedTimed。
+         */
+        data object PauseSelecting : Phase
     }
 
     private var phase: Phase = Phase.Idle
 
-    /** 是否正在录音会话中（含 Recording / Monitoring / Paused）。 */
+    /** 是否正在录音会话中（含 Recording / Monitoring / Paused* / PauseSelecting）。 */
     val isActive: Boolean get() = phase != Phase.Idle
 
     /** 会话开始：创建第一个片段并启动采样循环。幂等。 */
@@ -130,42 +157,154 @@ class SegmentController(
         }
     }
 
-    /** 用户手动暂停/继续，仅在 Recording ↔ Paused 间切换。Monitoring 状态下忽略。 */
+    /**
+     * 用户点击暂停/继续按钮。行为按当前阶段分流：
+     *
+     * - [Phase.Recording]：进入 [Phase.PauseSelecting]，开始 5 秒选择窗口（count=1 → 一直暂停）。
+     *   录音在此期间不暂停，按钮文本保持"暂停"，提示行显示"5 秒后暂停"。
+     * - [Phase.PauseSelecting]：count++ 并重启 5 秒窗口，按 count%4 切换提示文案
+     *   （一直暂停 / 暂停 X 分钟 / 暂停 Y 分钟 / 暂停 Z 分钟）。
+     * - [Phase.PausedForever] / [Phase.PausedTimed]：立即恢复录音（取消定时暂停倒计时）。
+     *
+     * 5 秒选择窗口结束（[pauseSelectJob] 到点）后才真正调用 recorder.pause()，
+     * 按所选档位进入 PausedForever（一直暂停）或 PausedTimed（X/Y/Z 分钟，每分钟递减）。
+     *
+     * Monitoring / Idle 态忽略。
+     */
     fun togglePause() {
         val recorder = mediaRecorder ?: return
         val file = currentFile ?: return
         when (phase) {
-            Phase.Recording -> {
-                try {
-                    recorder.pause()
-                    // 暂停时取消分组按钮可能挂起的 5 秒倒计时（手动操作优先，取消待执行分段）
-                    kbSwitchJob?.cancel()
-                    kbSwitchJob = null
-                    segmentFeedbackJob?.cancel()
-                    segmentFeedbackJob = null
-                    samplingJob?.cancel()
-                    samplingJob = null
-                    phase = Phase.Paused
-                    publishStatus(RecordingStatus.Paused(file))
-                    releaseWakeLock()
-                } catch (e: RuntimeException) {
-                    Log.e(TAG, "pause failed", e)
-                }
-            }
-            Phase.Paused -> {
-                try {
-                    recorder.resume()
-                    phase = Phase.Recording
-                    // 恢复后重置结束条件，避免暂停期间时间跳跃误触发
-                    engine?.onSegmentStart()
-                    publishStatus(RecordingStatus.Recording(file))
-                    acquireWakeLock()
-                    startSamplingLoop()
-                } catch (e: RuntimeException) {
-                    Log.e(TAG, "resume failed", e)
-                }
-            }
+            Phase.Recording -> enterPauseSelecting(file)
+            Phase.PauseSelecting -> cyclePauseSelecting(file)
+            Phase.PausedForever, Phase.PausedTimed -> resumeRecording(file)
             Phase.Monitoring, Phase.Idle -> Unit
+        }
+    }
+
+    /**
+     * 进入暂停选择窗口：count=1（一直暂停），启动 5 秒倒计时。
+     * 录音继续进行，仅刷新通知按钮文本为"暂停"、提示行为"5 秒后暂停"。
+     * 同时取消分组/分段按钮可能挂起的反馈任务，避免与暂停选择反馈行冲突。
+     */
+    private fun enterPauseSelecting(file: File) {
+        pauseSelectCount = 1
+        phase = Phase.PauseSelecting
+        // 选择窗口期间取消分组/分段反馈，提示行由暂停选择接管
+        kbSwitchJob?.cancel()
+        kbSwitchJob = null
+        segmentFeedbackJob?.cancel()
+        segmentFeedbackJob = null
+        onPauseFeedback?.invoke("暂停", "5 秒后暂停")
+        startPauseSelectJob(file)
+    }
+
+    /**
+     * 选择窗口内再次点击：count++，重启 5 秒窗口，按 count%4 更新提示文案。
+     * 4 档循环：1→一直暂停，2→X 分钟，3→Y 分钟，4→Z 分钟，5→一直暂停…
+     */
+    private fun cyclePauseSelecting(file: File) {
+        pauseSelectCount++
+        val config = settings.config.value
+        val hint = when ((pauseSelectCount - 1) % 4) {
+            0 -> "5 秒后暂停"
+            1 -> "暂停 ${config.pauseMinutesX} 分钟"
+            2 -> "暂停 ${config.pauseMinutesY} 分钟"
+            else -> "暂停 ${config.pauseMinutesZ} 分钟"
+        }
+        onPauseFeedback?.invoke("暂停", hint)
+        startPauseSelectJob(file)
+    }
+
+    /**
+     * 启动/重启 5 秒选择窗口倒计时。到点后按当前 count%4 进入对应暂停态：
+     * - mode 0：一直暂停（PausedForever）
+     * - mode 1/2/3：定时暂停 X/Y/Z 分钟（PausedTimed）
+     *
+     * 到点时才真正调用 recorder.pause()，选择窗口期间录音不中断。
+     */
+    private fun startPauseSelectJob(file: File) {
+        pauseSelectJob?.cancel()
+        pauseSelectJob = scope.launch {
+            delay(PAUSE_SELECT_WINDOW_MS)
+            val mode = (pauseSelectCount - 1) % 4
+            val recorder = mediaRecorder ?: return@launch
+            try {
+                recorder.pause()
+                // 暂停时取消采样循环与分组/分段反馈
+                samplingJob?.cancel()
+                samplingJob = null
+                kbSwitchJob?.cancel()
+                kbSwitchJob = null
+                segmentFeedbackJob?.cancel()
+                segmentFeedbackJob = null
+                if (mode == 0) {
+                    // 一直暂停
+                    phase = Phase.PausedForever
+                    publishStatus(RecordingStatus.Paused(file, remainingMinutes = null))
+                    releaseWakeLock()
+                } else {
+                    // 定时暂停 X/Y/Z 分钟
+                    val config = settings.config.value
+                    val minutes = when (mode) {
+                        1 -> config.pauseMinutesX
+                        2 -> config.pauseMinutesY
+                        else -> config.pauseMinutesZ
+                    }
+                    pauseRemainingMinutes = minutes
+                    phase = Phase.PausedTimed
+                    publishStatus(RecordingStatus.Paused(file, remainingMinutes = minutes))
+                    releaseWakeLock()
+                    startPauseCountdown(file)
+                }
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "pause failed", e)
+            }
+        }
+    }
+
+    /**
+     * 定时暂停的每分钟递减任务。每 60 秒 pauseRemainingMinutes-- 并刷新通知提示
+     * "暂停剩余 N 分钟"；到 0 时自动恢复录音。
+     */
+    private fun startPauseCountdown(file: File) {
+        pauseTimerJob?.cancel()
+        pauseTimerJob = scope.launch {
+            while (isActive && phase == Phase.PausedTimed && pauseRemainingMinutes > 0) {
+                delay(PAUSE_COUNTDOWN_INTERVAL_MS)
+                if (phase != Phase.PausedTimed) return@launch
+                pauseRemainingMinutes--
+                if (pauseRemainingMinutes <= 0) {
+                    // 倒计时结束，自动恢复录音
+                    resumeRecording(file)
+                    return@launch
+                }
+                // 刷新通知提示剩余分钟
+                onPauseFeedback?.invoke("继续", "暂停剩余 $pauseRemainingMinutes 分钟")
+            }
+        }
+    }
+
+    /**
+     * 恢复录音：取消定时暂停倒计时与选择窗口，recorder.resume()，回到 Recording。
+     * 用于用户点继续（PausedForever/PausedTimed）或定时暂停到 0 自动恢复。
+     */
+    private fun resumeRecording(file: File) {
+        pauseSelectJob?.cancel()
+        pauseSelectJob = null
+        pauseTimerJob?.cancel()
+        pauseTimerJob = null
+        val recorder = mediaRecorder ?: return
+        try {
+            recorder.resume()
+            phase = Phase.Recording
+            // 恢复后重置结束条件，避免暂停期间时间跳跃误触发
+            engine?.onSegmentStart()
+            publishStatus(RecordingStatus.Recording(file))
+            acquireWakeLock()
+            startSamplingLoop()
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "resume failed", e)
         }
     }
 
@@ -187,6 +326,8 @@ class SegmentController(
         kbSwitchJob = null
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
+        pauseSelectJob?.cancel()
+        pauseSelectJob = null
         manualSegmentInternal(retagKbId = null)
         // 分段完成后显示反馈行：当前片段保存到的知识库。startNewSegment 内部会
         // 先 publishStatus(Recording) 触发一次无反馈行的通知重建，此处再以反馈文本
@@ -282,11 +423,16 @@ class SegmentController(
         kbSwitchJob = null
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
+        pauseSelectJob?.cancel()
+        pauseSelectJob = null
+        pauseTimerJob?.cancel()
+        pauseTimerJob = null
         audioMonitor?.stop()
         audioMonitor = null
 
         when (phase) {
-            Phase.Recording, Phase.Paused -> finalizeAndUploadCurrent()
+            Phase.Recording, Phase.PausedForever, Phase.PausedTimed, Phase.PauseSelecting ->
+                finalizeAndUploadCurrent()
             Phase.Monitoring -> Unit // 间隔期无文件，无需上传
             Phase.Idle -> Unit
         }
@@ -353,6 +499,11 @@ class SegmentController(
         // 间隔期通知不再使用卡片反馈行，取消分段按钮可能挂起的反馈清除任务
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
+        // 取消可能挂起的暂停选择窗口
+        pauseSelectJob?.cancel()
+        pauseSelectJob = null
+        pauseTimerJob?.cancel()
+        pauseTimerJob = null
         finalizeAndUploadCurrent()
 
         val offset = settings.config.value.dbCalibrationOffset
@@ -634,6 +785,10 @@ class SegmentController(
         private const val KB_SWITCH_DELAY_MS = 5_000L
         /** 分段按钮点击后反馈行显示时长，到时自动清除。 */
         private const val SEGMENT_FEEDBACK_DURATION_MS = 5_000L
+        /** 暂停按钮点击后的选择窗口期，期间无新点击则按当前档位进入暂停。 */
+        private const val PAUSE_SELECT_WINDOW_MS = 5_000L
+        /** 定时暂停的倒计时轮询间隔（1 分钟），到 0 自动恢复录音。 */
+        private const val PAUSE_COUNTDOWN_INTERVAL_MS = 60_000L
         /** 片段最小上传时长，低于此值的片段保留到本地但不上传。 */
         private const val MIN_SEGMENT_DURATION_MS = 10_000L
         /** 单段文件大小上限（60MB），超过立即分段以降低大文件后台上传的 broken pipe 风险。 */

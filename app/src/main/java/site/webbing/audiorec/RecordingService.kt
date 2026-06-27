@@ -80,6 +80,12 @@ class RecordingService : Service() {
                 notificationHelper.showGroupFeedback(status, text, token)
             }
         }
+        controller.onPauseFeedback = { toggleText, hintText ->
+            // 暂停选择窗口 / 定时暂停倒计时反馈：刷新按钮文本与提示行文案
+            val status = RecordingStateStore.status.value
+            val token = mediaSession?.sessionToken
+            notificationHelper.updatePauseFeedback(status, toggleText, hintText, token)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

@@ -175,7 +175,89 @@ fun SettingsScreen(
                     segmentSettings.update { it.copy(stopAtHour = h, stopAtMinute = m) }
                 },
             )
+
+            // ── 暂停时长 ──
+            Text(
+                text = "暂停时长",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                text = "锁屏/通知暂停按钮连续点击循环：1下=一直暂停，2下=X分钟，3下=Y分钟，4下=Z分钟，5下回到一直暂停。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            PauseDurationSection(
+                minutesX = segmentConfig.pauseMinutesX,
+                minutesY = segmentConfig.pauseMinutesY,
+                minutesZ = segmentConfig.pauseMinutesZ,
+                onChange = { x, y, z ->
+                    segmentSettings.update {
+                        it.copy(pauseMinutesX = x, pauseMinutesY = y, pauseMinutesZ = z)
+                    }
+                },
+            )
         }
+    }
+}
+
+@Composable
+private fun PauseDurationSection(
+    minutesX: Int,
+    minutesY: Int,
+    minutesZ: Int,
+    onChange: (Int, Int, Int) -> Unit,
+) {
+    fun sanitize(v: String, fallback: Int): Int = v.toIntOrNull()?.takeIf { it in 1..600 } ?: fallback
+
+    var textX by rememberSaveable(minutesX) { mutableStateOf(minutesX.toString()) }
+    var textY by rememberSaveable(minutesY) { mutableStateOf(minutesY.toString()) }
+    var textZ by rememberSaveable(minutesZ) { mutableStateOf(minutesZ.toString()) }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        OutlinedTextField(
+            value = textX,
+            onValueChange = { textX = it.filter { c -> c.isDigit() } },
+            label = { Text("X 分钟") },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            isError = textX.toIntOrNull()?.let { it !in 1..600 } ?: true,
+        )
+        OutlinedTextField(
+            value = textY,
+            onValueChange = { textY = it.filter { c -> c.isDigit() } },
+            label = { Text("Y 分钟") },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            isError = textY.toIntOrNull()?.let { it !in 1..600 } ?: true,
+        )
+        OutlinedTextField(
+            value = textZ,
+            onValueChange = { textZ = it.filter { c -> c.isDigit() } },
+            label = { Text("Z 分钟") },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            isError = textZ.toIntOrNull()?.let { it !in 1..600 } ?: true,
+        )
+        OutlinedButton(
+            onClick = {
+                val x = sanitize(textX, minutesX)
+                val y = sanitize(textY, minutesY)
+                val z = sanitize(textZ, minutesZ)
+                textX = x.toString()
+                textY = y.toString()
+                textZ = z.toString()
+                onChange(x, y, z)
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+        ) { Text("保存") }
     }
 }
 

@@ -8,8 +8,14 @@ sealed interface RecordingStatus {
     /** 正在录制某个片段文件。 */
     data class Recording(val file: File) : RecordingStatus
 
-    /** 用户手动暂停（锁屏/通知暂停按钮），录音挂起。 */
-    data class Paused(val file: File) : RecordingStatus
+    /**
+     * 用户手动暂停（锁屏/通知暂停按钮），录音挂起。
+     *
+     * @param remainingMinutes 剩余暂停分钟数。
+     *   - null：一直暂停，需用户点继续恢复
+     *   - 正数：定时暂停，每分钟递减；到 0 自动恢复录音
+     */
+    data class Paused(val file: File, val remainingMinutes: Int? = null) : RecordingStatus
 
     /**
      * 自动分段的间隔期：MediaRecorder 已停止，但会话未结束，

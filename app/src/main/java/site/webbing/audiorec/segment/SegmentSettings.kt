@@ -25,6 +25,16 @@ import kotlinx.coroutines.flow.asStateFlow
  * @param stopAtEnabled 是否启用定时停止：到达设定的时刻自动结束录音会话
  * @param stopAtHour 定时停止的小时（0~23）
  * @param stopAtMinute 定时停止的分钟（0~59）
+ * @param pauseMinutesX 暂停按钮连续点击循环的第 2 档时长（分钟）
+ * @param pauseMinutesY 暂停按钮连续点击循环的第 3 档时长（分钟）
+ * @param pauseMinutesZ 暂停按钮连续点击循环的第 4 档时长（分钟）
+ *
+ * 暂停按钮连续点击循环（5 秒选择窗口内）：
+ * - 第 1 下 → 一直暂停
+ * - 第 2 下 → 暂停 X 分钟
+ * - 第 3 下 → 暂停 Y 分钟
+ * - 第 4 下 → 暂停 Z 分钟
+ * - 第 5 下 → 一直暂停（回到第 1 档，循环）
  */
 data class SegmentConfig(
     val autoSegmentEnabled: Boolean = false,
@@ -36,6 +46,9 @@ data class SegmentConfig(
     val stopAtEnabled: Boolean = false,
     val stopAtHour: Int = 18,
     val stopAtMinute: Int = 0,
+    val pauseMinutesX: Int = 5,
+    val pauseMinutesY: Int = 15,
+    val pauseMinutesZ: Int = 30,
 )
 
 /**
@@ -67,6 +80,9 @@ class SegmentSettings private constructor(context: Context) {
         stopAtEnabled = prefs.getBoolean(KEY_STOP_AT_ENABLED, false),
         stopAtHour = prefs.getInt(KEY_STOP_AT_HOUR, 18),
         stopAtMinute = prefs.getInt(KEY_STOP_AT_MINUTE, 0),
+        pauseMinutesX = prefs.getInt(KEY_PAUSE_MIN_X, 5),
+        pauseMinutesY = prefs.getInt(KEY_PAUSE_MIN_Y, 15),
+        pauseMinutesZ = prefs.getInt(KEY_PAUSE_MIN_Z, 30),
     )
 
     private fun save(config: SegmentConfig) {
@@ -80,6 +96,9 @@ class SegmentSettings private constructor(context: Context) {
             putBoolean(KEY_STOP_AT_ENABLED, config.stopAtEnabled)
             putInt(KEY_STOP_AT_HOUR, config.stopAtHour)
             putInt(KEY_STOP_AT_MINUTE, config.stopAtMinute)
+            putInt(KEY_PAUSE_MIN_X, config.pauseMinutesX)
+            putInt(KEY_PAUSE_MIN_Y, config.pauseMinutesY)
+            putInt(KEY_PAUSE_MIN_Z, config.pauseMinutesZ)
             apply()
         }
     }
@@ -103,5 +122,8 @@ class SegmentSettings private constructor(context: Context) {
         private const val KEY_STOP_AT_ENABLED = "stop_at_enabled"
         private const val KEY_STOP_AT_HOUR = "stop_at_hour"
         private const val KEY_STOP_AT_MINUTE = "stop_at_minute"
+        private const val KEY_PAUSE_MIN_X = "pause_minutes_x"
+        private const val KEY_PAUSE_MIN_Y = "pause_minutes_y"
+        private const val KEY_PAUSE_MIN_Z = "pause_minutes_z"
     }
 }
