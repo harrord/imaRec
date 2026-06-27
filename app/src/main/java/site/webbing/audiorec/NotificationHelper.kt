@@ -179,7 +179,7 @@ class NotificationHelper(private val context: Context) {
         if (status !is RecordingStatus.Recording && status !is RecordingStatus.Paused) return
         val isPaused = status is RecordingStatus.Paused
         val views = RemoteViews(context.packageName, R.layout.notification_recording).apply {
-            val groupEnabled = !isPaused && imaSettings.config.value.activeTabs.size >= 2
+            val groupEnabled = !isPaused && imaSettings.config.value.activeFolders.size >= 2
             // 灵感模式下分段按钮文案保持"灵感.."，即使进入暂停选择窗口/暂停态也维持提示
             val segmentText = if (InspirationModeStore.active.value) "灵感.." else "分段"
             setTextViewText(R.id.segment_button, segmentText)
@@ -252,7 +252,7 @@ class NotificationHelper(private val context: Context) {
     ): RemoteViews =
         RemoteViews(context.packageName, R.layout.notification_recording).apply {
             // 分组按钮：仅在录音态且主页 Tab ≥ 2 时可用；选择窗口/暂停态均置灰禁用
-            val groupEnabled = !isPaused && imaSettings.config.value.activeTabs.size >= 2
+            val groupEnabled = !isPaused && imaSettings.config.value.activeFolders.size >= 2
             // 灵感模式下分段按钮文案改为"灵感.."，提示用户当前为灵感记录态
             val inspirationActive = InspirationModeStore.active.value
             val segmentText = if (inspirationActive) "灵感.." else "分段"

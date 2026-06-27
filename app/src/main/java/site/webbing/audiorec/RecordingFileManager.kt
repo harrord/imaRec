@@ -12,16 +12,16 @@ private const val RECORDING_DIRECTORY = "recordings"
 /**
  * 录音文件元数据。
  *
- * [kbId] 为该文件归属的知识库 ID：
- * - 新录音创建时会把当前选中的 KB ID 写入文件名，[kbId] 从文件名解析得到
- * - 旧文件名中没有 KB ID 时，[kbId] 为空字符串，表示「未分类」
+ * [folderId] 为该文件归属的知识库文件夹 ID：
+ * - 新录音创建时会把当前选中的文件夹 ID 写入文件名，[folderId] 从文件名解析得到
+ * - 文件名中没有文件夹 ID 时，[folderId] 为空字符串，表示上传到知识库根目录（未分类）
  */
 data class RecordingFile(
     val name: String,
     val path: String,
     val lastModifiedMillis: Long,
     val sizeBytes: Long,
-    val kbId: String = "",
+    val folderId: String = "",
 )
 
 class RecordingFileManager(private val context: Context) {
@@ -30,41 +30,41 @@ class RecordingFileManager(private val context: Context) {
     /**
      * 创建一个新的录音文件。
      *
-     * 文件名格式：`REC_yyyyMMdd_HHmmss_kb<id>.m4a`
-     * 当 [kbId] 为空时（用户未选择知识库），退化为旧格式 `REC_yyyyMMdd_HHmmss.m4a`，
-     * 兼容无 Tab 状态下的录音。
+     * 文件名格式：`REC_yyyyMMdd_HHmmss_f<folderId>.m4a`
+     * 当 [folderId] 为空时（用户未选择文件夹，上传到知识库根目录），
+     * 退化为 `REC_yyyyMMdd_HHmmss.m4a`。
      */
-    fun createRecordingFile(kbId: String = ""): File {
+    fun createRecordingFile(folderId: String = ""): File {
         val directory = recordingsDirectory()
         if (!directory.exists()) {
             directory.mkdirs()
         }
         val base = "REC_${fileNameFormat.format(Date())}"
-        val name = if (kbId.isBlank()) "$base.m4a" else "${base}_kb$kbId.m4a"
+        val name = if (folderId.isBlank()) "$base.m4a" else "${base}_f$folderId.m4a"
         return File(directory, name)
     }
 
     /**
-     * 把文件名中嵌入的 KB ID 重写为 [newKbId] 并 rename 磁盘文件。
+     * 把文件名中嵌入的文件夹 ID 重写为 [newFolderId] 并 rename 磁盘文件。
      *
-     * 用途：分组按钮 5 秒倒计时到点触发分段时，把当前段（在旧 KB 下开始录的）
-     * 归到切换后的新 KB——同步文件名标签与上传目标，使本地列表与上传目标一致。
+     * 用途：分组按钮 5 秒倒计时到点触发分段时，把当前段（在旧文件夹下开始录的）
+     * 归到切换后的新文件夹——同步文件名标签与上传目标，使本地列表与上传目标一致。
      *
-     * - 旧文件名形如 `REC_xxx_kbAAA.m4a` → 重命名为 `REC_xxx_kbBBB.m4a`
-     * - 旧文件名为「未分类」格式（无 `_kb` 后缀）且 [newKbId] 非空时，补上 `_kb<id>` 后缀
-     * - [newKbId] 为空时，剥离 `_kb` 后缀退化为「未分类」格式
+     * - 旧文件名形如 `REC_xxx_fAAA.m4a` → 重命名为 `REC_xxx_fBBB.m4a`
+     * - 旧文件名为「未分类」格式（无 `_f` 后缀）且 [newFolderId] 非空时，补上 `_f<id>` 后缀
+     * - [newFolderId] 为空时，剥离 `_f` 后缀退化为「未分类」格式（上传到根目录）
      * - 文件不存在或 rename 失败（目标已存在/IO 异常）时返回原 [file]，调用方继续用旧文件上传
      *
      * 必须在 MediaRecorder.stop() 关闭文件之后调用，避免写入未结束。
      */
-    fun retagKbId(file: File, newKbId: String): File {
+    fun retagFolderId(file: File, newFolderId: String): File {
         if (!file.exists()) return file
         val oldName = file.name
         if (!oldName.endsWith(".m4a", ignoreCase = true)) return file
         val stem = oldName.removeSuffix(".m4a")
-        val idx = stem.lastIndexOf("_kb")
+        val idx = stem.lastIndexOf("_f")
         val base = if (idx >= 0) stem.substring(0, idx) else stem
-        val newName = if (newKbId.isBlank()) "$base.m4a" else "${base}_kb$newKbId.m4a"
+        val newName = if (newFolderId.isBlank()) "$base.m4a" else "${base}_f$newFolderId.m4a"
         if (newName == oldName) return file
         val target = File(file.parentFile, newName)
         return if (file.renameTo(target)) target else file
@@ -73,14 +73,14 @@ class RecordingFileManager(private val context: Context) {
     /**
      * 列出当前已落盘的录音文件。
      *
-     * - [kbId] 为 null：返回全部录音（无 Tab 状态使用，兼容旧版）
-     * - [kbId] 为非空字符串：只返回归属该 KB 的录音（按文件名中嵌入的 KB ID 精确匹配）
-     * - [kbId] 为空字符串：返回所有「未分类」录音（文件名中没有 KB ID 的旧文件）
+     * - [folderId] 为 null：返回全部录音（无 Tab 状态使用）
+     * - [folderId] 为非空字符串：只返回归属该文件夹的录音（按文件名中嵌入的 folder ID 精确匹配）
+     * - [folderId] 为空字符串：返回所有「未分类」录音（文件名中没有 folder ID 的文件，上传到根目录）
      *
      * 正在写入的文件（Recording / Paused 状态下的当前片段）会被排除，
      * 避免用户误以为录音已结束。
      */
-    fun listRecordings(kbId: String? = null): List<RecordingFile> {
+    fun listRecordings(folderId: String? = null): List<RecordingFile> {
         val directory = recordingsDirectory()
         if (!directory.exists()) return emptyList()
 
@@ -101,10 +101,10 @@ class RecordingFileManager(private val context: Context) {
             .sortedByDescending { it.lastModified() }
             .map { file -> file.toRecordingFile() }
             .filter { rec ->
-                when (kbId) {
+                when (folderId) {
                     null -> true
-                    "" -> rec.kbId.isBlank() // 未分类
-                    else -> rec.kbId == kbId
+                    "" -> rec.folderId.isBlank() // 未分类（根目录）
+                    else -> rec.folderId == folderId
                 }
             }
     }
@@ -115,20 +115,20 @@ class RecordingFileManager(private val context: Context) {
             path = absolutePath,
             lastModifiedMillis = lastModified(),
             sizeBytes = length(),
-            kbId = parseKbIdFromName(name),
+            folderId = parseFolderIdFromName(name),
         )
 
     /**
-     * 从文件名中解析归属的 KB ID。
-     * 文件名形如 `REC_20260626_120000_kb12345.m4a`，返回 `12345`；
-     * 旧格式 `REC_20260626_120000.m4a` 返回空字符串。
+     * 从文件名中解析归属的文件夹 ID。
+     * 文件名形如 `REC_20260626_120000_f12345.m4a`，返回 `12345`；
+     * 旧格式 `REC_20260626_120000.m4a` 返回空字符串（上传到知识库根目录）。
      */
-    private fun parseKbIdFromName(name: String): String {
+    private fun parseFolderIdFromName(name: String): String {
         if (!name.endsWith(".m4a", ignoreCase = true)) return ""
         val stem = name.removeSuffix(".m4a")
-        val idx = stem.lastIndexOf("_kb")
+        val idx = stem.lastIndexOf("_f")
         if (idx < 0) return ""
-        return stem.substring(idx + 3)
+        return stem.substring(idx + 2)
     }
 
     private fun recordingsDirectory(): File {

@@ -72,13 +72,15 @@ class ImaUploader private constructor(
      * - 多次调用会排队，前一个完成（成功/失败）后才开始下一个。
      * - 进度与结果通过 [ImaUploadStateStore] 暴露给 UI。
      *
-     * @param overrideKbId 非空时，本次上传使用此 KB ID 而非 [ImaConfig.knowledgeBaseId]，
-     *                     用于灵感记录功能把录音上传到独立的灵感知识库。
+     * @param overrideFolderId 非空时，本次上传使用此 folder_id 而非 [ImaConfig.currentFolderId]，
+     *                         用于灵感记录功能把录音上传到独立的灵感文件夹。
+     *                         空串表示上传到知识库根目录。
      */
-    fun enqueueUpload(file: File, overrideKbId: String? = null) {
+    fun enqueueUpload(file: File, overrideFolderId: String? = null) {
         val config = settings.config.value
-        val effectiveConfig = if (overrideKbId != null) {
-            config.copy(knowledgeBaseId = overrideKbId)
+        // 重构后知识库固定为一个，仅 folder_id 可被覆盖（灵感模式上传到灵感文件夹）
+        val effectiveConfig = if (overrideFolderId != null) {
+            config.copy(currentFolderId = overrideFolderId)
         } else {
             config
         }
@@ -92,15 +94,16 @@ class ImaUploader private constructor(
             )
             return
         }
-        // 诊断日志：把实际使用的配置打出来（KB ID 用引号包裹并标注长度，
+        // 诊断日志：把实际使用的配置打出来（KB ID / folder ID 用引号包裹并标注长度，
         // 用于暴露首尾空白、不可见字符等常见复制粘贴问题）
         logD(
             "enqueueUpload start: file=${file.name} size=${file.length()}\n" +
                 "  clientId=\"${effectiveConfig.clientId}\" (len=${effectiveConfig.clientId.length}, trimmed=${effectiveConfig.clientId.trim().length})\n" +
                 "  apiKey provided=${effectiveConfig.apiKey.isNotBlank()} (len=${effectiveConfig.apiKey.length}, trimmed=${effectiveConfig.apiKey.trim().length})\n" +
                 "  knowledgeBaseId=\"${effectiveConfig.knowledgeBaseId}\" (len=${effectiveConfig.knowledgeBaseId.length}, trimmed=${effectiveConfig.knowledgeBaseId.trim().length})\n" +
+                "  currentFolderId=\"${effectiveConfig.currentFolderId}\" (len=${effectiveConfig.currentFolderId.length})\n" +
                 "  kbIdHasLeadingOrTrailingWhitespace=${effectiveConfig.knowledgeBaseId != effectiveConfig.knowledgeBaseId.trim()}" +
-                if (overrideKbId != null) "\n  overrideKbId=$overrideKbId (灵感上传)" else ""
+                if (overrideFolderId != null) "\n  overrideFolderId=$overrideFolderId (灵感上传)" else ""
         )
         scope.launch {
             uploadMutex.withLock {
@@ -127,16 +130,18 @@ class ImaUploader private constructor(
     }
 
     /**
-     * 拉取当前账号下可添加内容的知识库列表（用于设置页选择目标知识库）。
+     * 拉取当前账号下可添加内容的知识库列表（用于设置页选择唯一目标知识库）。
      * 仅依赖 Client ID + API Key，不要求 knowledgeBaseId 已填。
      * 网络请求在 IO 线程执行，调用方可安全在主线程调用。
+     *
+     * 返回 [FolderOption] 复用 {id, name} 结构（KB 也是一种可选项）。
      */
-    suspend fun listAddableKnowledgeBases(): List<KnowledgeBaseOption> = withContext(Dispatchers.IO) {
+    suspend fun listAddableKnowledgeBases(): List<FolderOption> = withContext(Dispatchers.IO) {
         val config = settings.config.value
         if (config.clientId.isBlank() || config.apiKey.isBlank()) {
             throw ImaException("请先填写 Client ID 和 API Key")
         }
-        val result = mutableListOf<KnowledgeBaseOption>()
+        val result = mutableListOf<FolderOption>()
         var cursor = ""
         do {
             val body = JSONObject().apply {
@@ -150,12 +155,109 @@ class ImaUploader private constructor(
                 val item = list.optJSONObject(i) ?: continue
                 val id = item.optString("id")
                 val name = item.optString("name")
-                if (id.isNotBlank()) result.add(KnowledgeBaseOption(id = id, name = name))
+                if (id.isNotBlank()) result.add(FolderOption(id = id, name = name))
             }
             if (data.optBoolean("is_end", true)) break
             cursor = data.optString("next_cursor")
         } while (cursor.isNotBlank())
         logD("listAddableKnowledgeBases done: count=${result.size}")
+        result
+    }
+
+    /**
+     * 拉取当前知识库中的文件夹列表（用于设置页选择目标文件夹）。
+     *
+     * 依据 /Users/xuwenbing/emptyClaude2/ima-Rec 的 SKILL.md 与 api.md：
+     * - get_knowledge_list 返回结果同时包含文件（KnowledgeInfo）和文件夹（FolderInfo）
+     * - FolderInfo 含 folder_id / name / file_number / folder_number / is_top 字段
+     * - 文件夹的 media_id 可作为 folder_id 使用（见 SKILL.md「定位文件夹」章节）
+     * 判断条件：含 folder_id 字段，或含 file_number/folder_number/is_top 任一标记字段。
+     */
+    suspend fun listFolders(): List<FolderOption> = withContext(Dispatchers.IO) {
+        val config = settings.config.value
+        if (config.clientId.isBlank() || config.apiKey.isBlank() ||
+            config.knowledgeBaseId.isBlank()
+        ) {
+            return@withContext emptyList()
+        }
+        val result = mutableListOf<FolderOption>()
+        var cursor = ""
+        do {
+            val body = JSONObject().apply {
+                put("knowledge_base_id", config.knowledgeBaseId)
+                put("cursor", cursor)
+                put("limit", 50)
+            }
+            logD("→ listFolders: cursor=\"$cursor\"")
+            val data = postJson("openapi/wiki/v1/get_knowledge_list", body, config)
+            val list = data.optJSONArray("knowledge_list") ?: JSONArray()
+            for (i in 0 until list.length()) {
+                val item = list.optJSONObject(i) ?: continue
+                val hasFolderId = item.has("folder_id")
+                val hasFolderMarker = item.has("file_number") ||
+                    item.has("folder_number") ||
+                    item.has("is_top")
+                if (hasFolderId || hasFolderMarker) {
+                    val id = item.optString("folder_id", "").ifBlank {
+                        item.optString("media_id", "")
+                    }
+                    val name = item.optString("name", "").ifBlank {
+                        item.optString("title", "")
+                    }
+                    if (id.isNotBlank()) result.add(FolderOption(id = id, name = name))
+                }
+            }
+            if (data.optBoolean("is_end", true)) break
+            cursor = data.optString("next_cursor")
+        } while (cursor.isNotBlank())
+        logD("listFolders done: count=${result.size}")
+        result
+    }
+
+    /**
+     * 通过 search_knowledge 按名称搜索文件夹（文档推荐的定位文件夹方法）。
+     *
+     * 依据 SKILL.md「定位文件夹」章节：「方法 1：搜索（推荐）...从 info_list 找匹配文件夹，
+     * 取 media_id 作为 folder_id」。api.md 第 489 行：「search_knowledge 搜索结果中也会包含
+     * 匹配的文件夹」。
+     *
+     * 搜索结果同时含文件和文件夹，此处全部返回，由用户在 UI 中辨认目标文件夹。
+     * 文件夹 ID 取 media_id（按文档指引），名称取 title。
+     */
+    suspend fun searchFolders(query: String): List<FolderOption> = withContext(Dispatchers.IO) {
+        val config = settings.config.value
+        if (config.clientId.isBlank() || config.apiKey.isBlank()) {
+            throw ImaException("请先填写 Client ID 和 API Key")
+        }
+        if (config.knowledgeBaseId.isBlank()) {
+            throw ImaException("请先选择目标知识库")
+        }
+        if (query.isBlank()) {
+            throw ImaException("请输入文件夹名称关键词")
+        }
+        val result = mutableListOf<FolderOption>()
+        var cursor = ""
+        do {
+            val body = JSONObject().apply {
+                put("query", query)
+                put("knowledge_base_id", config.knowledgeBaseId)
+                put("cursor", cursor)
+            }
+            logD("→ searchFolders: query=\"$query\" cursor=\"$cursor\"")
+            val data = postJson("openapi/wiki/v1/search_knowledge", body, config)
+            val list = data.optJSONArray("info_list") ?: JSONArray()
+            for (i in 0 until list.length()) {
+                val item = list.optJSONObject(i) ?: continue
+                val id = item.optString("media_id", "")
+                val name = item.optString("title", "")
+                if (id.isNotBlank()) {
+                    result.add(FolderOption(id = id, name = name))
+                }
+            }
+            if (data.optBoolean("is_end", true)) break
+            cursor = data.optString("next_cursor")
+        } while (cursor.isNotBlank())
+        logD("searchFolders done: query=\"$query\" count=${result.size}")
         result
     }
 
@@ -206,6 +308,10 @@ class ImaUploader private constructor(
                 })
             })
             put("knowledge_base_id", config.knowledgeBaseId)
+            // folder_id 省略=根目录；非空=指定文件夹。保证重名检查范围与上传目标一致
+            if (config.currentFolderId.isNotBlank()) {
+                put("folder_id", config.currentFolderId)
+            }
         }
         val data = postJson("openapi/wiki/v1/check_repeated_names", body, config)
         val results = data.optJSONArray("results") ?: return fileName
@@ -353,6 +459,10 @@ class ImaUploader private constructor(
             put("media_id", mediaId)
             put("title", fileName)
             put("knowledge_base_id", config.knowledgeBaseId)
+            // folder_id 省略=根目录；非空=上传到指定文件夹（重构后核心能力）
+            if (config.currentFolderId.isNotBlank()) {
+                put("folder_id", config.currentFolderId)
+            }
             put("file_info", JSONObject().apply {
                 put("cos_key", cosCred.cosKey)
                 put("file_size", fileSize)

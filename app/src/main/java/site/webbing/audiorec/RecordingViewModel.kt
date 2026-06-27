@@ -29,9 +29,9 @@ data class RecordingUiState(
     val segmentInfo: SegmentInfo? = null,
     val uploadStatusByFile: Map<String, ImaUploadStatus> = emptyMap(),
     val sharedFiles: Set<String> = emptySet(),
-    val activeTabs: List<KnowledgeBaseOption> = emptyList(),
-    val selectedKbId: String = "",
-    val allKnowledgeBases: List<KnowledgeBaseOption> = emptyList(),
+    val activeFolders: List<FolderOption> = emptyList(),
+    val selectedFolderId: String = "",
+    val allFolders: List<FolderOption> = emptyList(),
 ) {
     val isRecording: Boolean
         get() = recordingStatus !is RecordingStatus.Idle
@@ -75,9 +75,9 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
             segmentInfo = values[4] as SegmentInfo?,
             uploadStatusByFile = uploadStatusByFile,
             sharedFiles = sharedFiles,
-            activeTabs = cfg.activeTabs,
-            selectedKbId = cfg.knowledgeBaseId,
-            allKnowledgeBases = cfg.allKnowledgeBases,
+            activeFolders = cfg.activeFolders,
+            selectedFolderId = cfg.currentFolderId,
+            allFolders = cfg.allFolders,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -102,12 +102,12 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
             }
         }
 
-        // 当默认 KB ID 变化（用户切 Tab / 在设置里换 KB / 增删 Tab）时，
+        // 当当前选中文件夹变化（用户切 Tab / 在设置里换文件夹 / 增删 Tab）时，
         // 重新按归属过滤录音列表，保证主页列表与当前选中 Tab 一致。
         viewModelScope.launch {
             imaSettings.config.collect { cfg ->
-                Log.d(TAG, "config changed: selectedKbId=${cfg.knowledgeBaseId} activeTabs=${cfg.activeTabs.size}")
-                refreshRecordingsFor(cfg.knowledgeBaseId, cfg.activeTabs)
+                Log.d(TAG, "config changed: selectedFolderId=${cfg.currentFolderId} activeFolders=${cfg.activeFolders.size}")
+                refreshRecordingsFor(cfg.currentFolderId, cfg.activeFolders)
             }
         }
     }
@@ -132,22 +132,22 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
 
     /**
      * 刷新录音列表。根据当前是否有 Tab 决定过滤策略：
-     * - 有 Tab：按当前选中 KB ID 过滤；选中为空时显示「未分类」
-     * - 无 Tab：显示全部录音（兼容旧版无 KB 状态）
+     * - 有 Tab：按当前选中文件夹 ID 过滤；选中为空时显示「未分类」（根目录）
+     * - 无 Tab：显示全部录音
      */
     fun refreshRecordings() {
         val cfg = imaSettings.config.value
-        refreshRecordingsFor(cfg.knowledgeBaseId, cfg.activeTabs)
+        refreshRecordingsFor(cfg.currentFolderId, cfg.activeFolders)
     }
 
-    private fun refreshRecordingsFor(selectedKbId: String, activeTabs: List<KnowledgeBaseOption>) {
-        val filterKbId: String? = if (activeTabs.isEmpty()) {
-            null // 无 Tab：显示全部（兼容旧版与「未分类」）
+    private fun refreshRecordingsFor(selectedFolderId: String, activeFolders: List<FolderOption>) {
+        val filterFolderId: String? = if (activeFolders.isEmpty()) {
+            null // 无 Tab：显示全部
         } else {
-            selectedKbId // 有 Tab：严格按当前选中 KB 过滤（含空串 → 未分类）
+            selectedFolderId // 有 Tab：严格按当前选中文件夹过滤（含空串 → 未分类/根目录）
         }
-        Log.d(TAG, "refreshRecordingsFor: filterKbId=$filterKbId")
-        val list = fileManager.listRecordings(filterKbId)
+        Log.d(TAG, "refreshRecordingsFor: filterFolderId=$filterFolderId")
+        val list = fileManager.listRecordings(filterFolderId)
         Log.d(TAG, "refreshRecordingsFor: got ${list.size} files")
         recordings.value = list
     }
@@ -255,21 +255,21 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
 
     // ── 主页 Tab 操作（委托给 ImaSettings，保证双向绑定与持久化） ──
 
-    /** 主页切换 Tab：同步更新默认 KB ID/Name，列表会随之自动过滤。 */
-    fun selectTab(kbId: String) {
-        imaSettings.selectTab(kbId)
+    /** 主页切换 Tab：同步更新当前选中文件夹 ID，列表会随之自动过滤。 */
+    fun selectFolder(folderId: String) {
+        imaSettings.selectFolder(folderId)
     }
 
-    /** 主页「+」号添加 Tab 并切换过去。 */
-    fun addTabAndSelect(kb: KnowledgeBaseOption) {
-        Log.d(TAG, "addTabAndSelect: kb=${kb.id}")
-        imaSettings.addTabAndSelect(kb)
-        Log.d(TAG, "addTabAndSelect: done")
+    /** 主页「+」号添加 Tab（文件夹）并切换过去。 */
+    fun addFolderAndSelect(folder: FolderOption) {
+        Log.d(TAG, "addFolderAndSelect: folder=${folder.id}")
+        imaSettings.addFolderAndSelect(folder)
+        Log.d(TAG, "addFolderAndSelect: done")
     }
 
-    /** 主页长按移除 Tab（仅从主页移除视图，不删除知识库）。 */
-    fun removeTab(kbId: String) {
-        imaSettings.removeTab(kbId)
+    /** 主页长按移除 Tab（仅从主页移除视图，不删除服务端文件夹）。 */
+    fun removeFolder(folderId: String) {
+        imaSettings.removeFolder(folderId)
     }
 
     override fun onCleared() {

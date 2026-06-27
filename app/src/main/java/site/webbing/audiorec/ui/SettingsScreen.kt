@@ -34,6 +34,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -44,11 +45,12 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import site.webbing.audiorec.FolderOption
 import site.webbing.audiorec.ImaSettings
 import site.webbing.audiorec.ImaUploader
-import site.webbing.audiorec.KnowledgeBaseOption
 import site.webbing.audiorec.segment.SegmentConfig
 import site.webbing.audiorec.segment.SegmentSettings
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -114,29 +116,51 @@ fun SettingsScreen(
                 selectedId = config.knowledgeBaseId,
                 selectedName = config.knowledgeBaseName,
                 onSelected = { id, name ->
-                    // 选中知识库时同时把它加入主页 Tab 并切换为当前选中，保持设置页与主页 Tab 双向绑定
-                    settings.addTabAndSelect(KnowledgeBaseOption(id = id, name = name))
+                    // 重构后知识库固定为一个：选中后写入 KB 配置，并清空旧 KB 的文件夹状态
+                    settings.setKnowledgeBase(id, name)
                 },
             )
 
-            // ── 灵感目标知识库 ──
-            // 独立于默认上传 KB：双击锁屏分段按钮进入灵感模式后，灵感期间的录音保存并上传到此 KB。
-            // 仅更新灵感 KB 配置，不影响默认 KB 与主页 Tab 选中态。
+            // ── 文件夹选择 ──
+            // 重构后 APP 操作范围限定在同一个知识库内，主页 Tab 与上传目标均为文件夹。
+            // 此处选择"默认上传文件夹"：选中后加入主页 Tab 并切换为当前选中。
             Text(
-                text = "灵感目标知识库",
+                text = "文件夹",
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(top = 8.dp),
             )
             Text(
-                text = "锁屏分段按钮双击进入灵感模式，灵感期间的录音会保存并上传到此知识库（不受 10 秒限制）。未配置时双击等同于单击，不进入灵感模式。",
+                text = "录音会上传到所选知识库的此文件夹中。主页 Tab 栏展示已添加的文件夹，可在录音中切换。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            KnowledgeBasePicker(
-                selectedId = config.inspirationKbId,
-                selectedName = config.inspirationKbName,
+            FolderPicker(
+                selectedId = config.currentFolderId,
+                knowledgeBaseId = config.knowledgeBaseId,
                 onSelected = { id, name ->
-                    settings.setInspirationKb(id, name)
+                    // 选中文件夹后加入主页 Tab 并切换为当前选中
+                    settings.addFolderAndSelect(FolderOption(id = id, name = name))
+                },
+            )
+
+            // ── 灵感目标文件夹 ──
+            // 独立于默认上传文件夹：双击锁屏分段按钮进入灵感模式后，灵感期间的录音保存并上传到此文件夹。
+            // 仅更新灵感文件夹配置，不影响默认文件夹与主页 Tab 选中态。
+            Text(
+                text = "灵感目标文件夹",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            Text(
+                text = "锁屏分段按钮双击进入灵感模式，灵感期间的录音会保存并上传到此文件夹（不受 10 秒限制）。未配置时双击等同于单击，不进入灵感模式。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            FolderPicker(
+                selectedId = config.inspirationFolderId,
+                knowledgeBaseId = config.knowledgeBaseId,
+                onSelected = { id, name ->
+                    settings.setInspirationFolder(id, name)
                 },
             )
 
@@ -527,11 +551,10 @@ private fun KnowledgeBasePicker(
     onSelected: (id: String, name: String) -> Unit,
 ) {
     val context = LocalContext.current
-    val settings = remember { ImaSettings.get(context) }
     var showDialog by rememberSaveable { mutableStateOf(false) }
     var loading by rememberSaveable { mutableStateOf(false) }
     var error by rememberSaveable { mutableStateOf<String?>(null) }
-    var list by remember { mutableStateOf<List<KnowledgeBaseOption>>(emptyList()) }
+    var list by remember { mutableStateOf<List<FolderOption>>(emptyList()) }
 
     val displayText = when {
         selectedName.isNotBlank() -> "知识库：$selectedName"
@@ -541,7 +564,7 @@ private fun KnowledgeBasePicker(
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
-            text = "知识库",
+            text = "知识库（固定一个）",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -565,12 +588,8 @@ private fun KnowledgeBasePicker(
             loading = true
             error = null
             try {
-                val fetched = ImaUploader.get(context).listAddableKnowledgeBases()
-                list = fetched
-                // 每次拉取都用云端最新结果覆盖本地全量列表，并同步 Tab 显示名 / 选中态：
-                // - 云端改名的 KB，主页 Tab 与设置页选中态会同步刷新
-                // - 云端删除的 KB，会从 activeTabs 移除；若是当前选中 KB，则清空选中
-                settings.applyAllKnowledgeBases(fetched)
+                // 拉取可添加内容的知识库列表（仅用于选择唯一 KB，不再写 allKnowledgeBases）
+                list = ImaUploader.get(context).listAddableKnowledgeBases()
             } catch (e: Exception) {
                 error = e.message ?: "获取知识库列表失败"
             } finally {
@@ -619,6 +638,162 @@ private fun KnowledgeBasePicker(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showDialog = false }) { Text("取消") }
+            },
+        )
+    }
+}
+
+/**
+ * 文件夹选择器：拉取当前知识库根目录下的文件夹列表供用户选择。
+ *
+ * - 依赖 [knowledgeBaseId]：未配置知识库时提示先选 KB
+ * - 通过 [ImaUploader.searchFolders] 按名称关键词搜索文件夹（文档推荐方法），
+ *   因为 get_knowledge_list 实测不返回文件夹条目，仅返回文件
+ * - 空文件夹名时显示 id；列表为空时给出提示
+ */
+@Composable
+private fun FolderPicker(
+    selectedId: String,
+    knowledgeBaseId: String,
+    onSelected: (id: String, name: String) -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var showDialog by rememberSaveable { mutableStateOf(false) }
+    var query by rememberSaveable { mutableStateOf("") }
+    var loading by rememberSaveable { mutableStateOf(false) }
+    var error by rememberSaveable { mutableStateOf<String?>(null) }
+    var list by remember { mutableStateOf<List<FolderOption>>(emptyList()) }
+    var hasSearched by rememberSaveable { mutableStateOf(false) }
+
+    val displayText = when {
+        selectedId.isNotBlank() -> "文件夹：$selectedId"
+        else -> "点击选择文件夹"
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        OutlinedButton(
+            onClick = { if (knowledgeBaseId.isNotBlank()) showDialog = true },
+            enabled = knowledgeBaseId.isNotBlank(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp),
+        ) {
+            Text(
+                text = if (knowledgeBaseId.isBlank()) "请先选择知识库" else displayText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+
+    if (showDialog) {
+        AlertDialog(
+            onDismissRequest = { showDialog = false },
+            title = { Text("搜索并选择文件夹") },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "输入文件夹名称关键词搜索（在 IMA 客户端看到的文件夹名）。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    androidx.compose.foundation.layout.Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OutlinedTextField(
+                            value = query,
+                            onValueChange = { query = it },
+                            label = { Text("文件夹名关键词") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(
+                            onClick = {
+                                loading = true
+                                error = null
+                                hasSearched = true
+                                list = emptyList()
+                                scope.launch {
+                                    try {
+                                        val fetched = ImaUploader.get(context).searchFolders(query.trim())
+                                        list = fetched
+                                    } catch (e: Exception) {
+                                        error = e.message ?: "搜索失败"
+                                    } finally {
+                                        loading = false
+                                    }
+                                }
+                            },
+                            enabled = query.isNotBlank() && !loading,
+                            modifier = Modifier.padding(start = 4.dp),
+                        ) { Text("搜索") }
+                    }
+
+                    when {
+                        loading -> {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 16.dp),
+                            ) {
+                                CircularProgressIndicator()
+                            }
+                        }
+                        error != null -> Text(
+                            text = error!!,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = 12.dp),
+                        )
+                        hasSearched && list.isEmpty() -> Text(
+                            text = "未搜到匹配项。请检查关键词或文件夹名是否正确。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 12.dp),
+                        )
+                        list.isNotEmpty() -> LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 320.dp)
+                                .padding(top = 8.dp),
+                        ) {
+                            items(list, key = { it.id }) { folder ->
+                                TextButton(
+                                    onClick = {
+                                        onSelected(folder.id, folder.name)
+                                        showDialog = false
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Column(modifier = Modifier.fillMaxWidth()) {
+                                        Text(
+                                            text = folder.name.ifBlank { folder.id },
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Text(
+                                            text = folder.id,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
                                 }
                             }
                         }

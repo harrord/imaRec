@@ -229,9 +229,9 @@ private fun ImaRecApp(
             onRecordingReupload = viewModel::reuploadRecording,
             onRecordingImportIma = onImportImaRequest,
             onMessageShown = viewModel::messageShown,
-            onTabSelected = viewModel::selectTab,
-            onTabAdd = viewModel::addTabAndSelect,
-            onTabRemove = viewModel::removeTab,
+            onFolderSelected = viewModel::selectFolder,
+            onFolderAdd = viewModel::addFolderAndSelect,
+            onFolderRemove = viewModel::removeFolder,
         )
     }
 }

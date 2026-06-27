@@ -117,7 +117,7 @@ class RecordingService : Service() {
             }
             ACTION_SWITCH_KB -> {
                 performHapticFeedback()
-                controller.switchKnowledgeBase()
+                controller.switchFolder()
             }
         }
         return START_NOT_STICKY

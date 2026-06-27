@@ -87,8 +87,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import android.util.Log
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import site.webbing.audiorec.FolderOption
 import site.webbing.audiorec.ImaUploadStatus
-import site.webbing.audiorec.KnowledgeBaseOption
 import site.webbing.audiorec.PlaybackStatus
 import site.webbing.audiorec.RecordingFile
 import site.webbing.audiorec.RecordingStatus
@@ -112,16 +112,16 @@ fun MainScreen(
     onRecordingReupload: (RecordingFile) -> Unit,
     onRecordingImportIma: (RecordingFile) -> Unit,
     onMessageShown: () -> Unit,
-    onTabSelected: (String) -> Unit,
-    onTabAdd: (KnowledgeBaseOption) -> Unit,
-    onTabRemove: (String) -> Unit,
+    onFolderSelected: (String) -> Unit,
+    onFolderAdd: (FolderOption) -> Unit,
+    onFolderRemove: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     var menuRecording by remember { mutableStateOf<RecordingFile?>(null) }
     var pendingDelete by remember { mutableStateOf<RecordingFile?>(null) }
-    var pendingRemoveTab by remember { mutableStateOf<KnowledgeBaseOption?>(null) }
-    var showAddTabDialog by remember { mutableStateOf(false) }
+    var pendingRemoveFolder by remember { mutableStateOf<FolderOption?>(null) }
+    var showAddFolderDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(uiState.message) {
         val message = uiState.message ?: return@LaunchedEffect
@@ -234,39 +234,39 @@ fun MainScreen(
         )
     }
 
-    // 长按 Tab 移除确认弹窗（仅从主页移除视图，不删除服务端知识库）
-    if (pendingRemoveTab != null) {
-        val tab = pendingRemoveTab!!
+    // 长按 Tab 移除确认弹窗（仅从主页移除视图，不删除服务端文件夹）
+    if (pendingRemoveFolder != null) {
+        val folder = pendingRemoveFolder!!
         AlertDialog(
-            onDismissRequest = { pendingRemoveTab = null },
-            title = { Text("移除知识库标签") },
+            onDismissRequest = { pendingRemoveFolder = null },
+            title = { Text("移除文件夹标签") },
             text = {
-                Text("从主页移除「${tab.name.ifBlank { tab.id }}」？\n知识库本身不会被删除，可稍后通过「+」重新添加。")
+                Text("从主页移除「${folder.name.ifBlank { folder.id }}」？\n文件夹本身不会被删除，可稍后通过「+」重新添加。")
             },
             confirmButton = {
                 TextButton(onClick = {
-                    onTabRemove(tab.id)
-                    pendingRemoveTab = null
+                    onFolderRemove(folder.id)
+                    pendingRemoveFolder = null
                 }) { Text("移除") }
             },
             dismissButton = {
-                TextButton(onClick = { pendingRemoveTab = null }) { Text("取消") }
+                TextButton(onClick = { pendingRemoveFolder = null }) { Text("取消") }
             },
         )
     }
 
-    // 「+」号添加 Tab 弹窗：从全量列表中过滤掉已展开的 Tab
-    if (showAddTabDialog) {
-        AddTabDialog(
-            allKnowledgeBases = uiState.allKnowledgeBases,
-            activeTabs = uiState.activeTabs,
-            onSelected = { kb ->
-                Log.d("MainScreen", "AddTabDialog onSelected: kb=${kb.id} name=${kb.name}")
-                onTabAdd(kb)
-                Log.d("MainScreen", "AddTabDialog onTabAdd returned")
-                showAddTabDialog = false
+    // 「+」号添加 Tab 弹窗：从全量文件夹列表中过滤掉已展开的 Tab
+    if (showAddFolderDialog) {
+        AddFolderDialog(
+            allFolders = uiState.allFolders,
+            activeFolders = uiState.activeFolders,
+            onSelected = { folder ->
+                Log.d("MainScreen", "AddFolderDialog onSelected: folder=${folder.id} name=${folder.name}")
+                onFolderAdd(folder)
+                Log.d("MainScreen", "AddFolderDialog onFolderAdd returned")
+                showAddFolderDialog = false
             },
-            onDismiss = { showAddTabDialog = false },
+            onDismiss = { showAddFolderDialog = false },
         )
     }
 
@@ -275,12 +275,12 @@ fun MainScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    KnowledgeTabRow(
-                        activeTabs = uiState.activeTabs,
-                        selectedKbId = uiState.selectedKbId,
-                        onTabSelected = onTabSelected,
-                        onTabLongPress = { pendingRemoveTab = it },
-                        onAddClick = { showAddTabDialog = true },
+                    FolderTabRow(
+                        activeFolders = uiState.activeFolders,
+                        selectedFolderId = uiState.selectedFolderId,
+                        onFolderSelected = onFolderSelected,
+                        onFolderLongPress = { pendingRemoveFolder = it },
+                        onAddClick = { showAddFolderDialog = true },
                     )
                 },
                 actions = {
@@ -655,34 +655,34 @@ private val UploadSuccessColor = Color(0xFF4CAF50)
 private val UploadPendingColor = Color(0xFFFFC107)
 
 /**
- * 主页顶部的知识库选项卡栏。
+ * 主页顶部的文件夹选项卡栏。
  *
- * - 未配置任何知识库（[activeTabs] 为空）时，显示占位标题「imaRec」，不渲染 Tab 与「+」
+ * - 未配置任何文件夹（[activeFolders] 为空）时，显示占位标题「imaRec」，不渲染 Tab 与「+」
  * - 有 Tab 时使用 [ScrollableTabRow] 水平滑动，右侧常驻「+」入口
- * - 单个 Tab 长按触发 [onTabLongPress]，由上层弹确认框移除
+ * - 单个 Tab 长按触发 [onFolderLongPress]，由上层弹确认框移除
  *
- * 选中态与 [selectedKbId] 双向绑定：点击 Tab 调用 [onTabSelected]，由 ViewModel
- * 同步写入 ImaSettings.knowledgeBaseId，进而驱动列表过滤与录音归属。
+ * 选中态与 [selectedFolderId] 双向绑定：点击 Tab 调用 [onFolderSelected]，由 ViewModel
+ * 同步写入 ImaSettings.currentFolderId，进而驱动列表过滤与录音归属（上传目标文件夹）。
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun KnowledgeTabRow(
-    activeTabs: List<KnowledgeBaseOption>,
-    selectedKbId: String,
-    onTabSelected: (String) -> Unit,
-    onTabLongPress: (KnowledgeBaseOption) -> Unit,
+private fun FolderTabRow(
+    activeFolders: List<FolderOption>,
+    selectedFolderId: String,
+    onFolderSelected: (String) -> Unit,
+    onFolderLongPress: (FolderOption) -> Unit,
     onAddClick: () -> Unit,
 ) {
-    if (activeTabs.isEmpty()) {
+    if (activeFolders.isEmpty()) {
         Text("imaRec")
         return
     }
-    // selectedIndex 必须严格落在 activeTabs 范围内：
+    // selectedIndex 必须严格落在 activeFolders 范围内：
     // ScrollableTabRow 的 SubcomposeLayout 在 tab 数量变化的同一帧，
     // 内部 tabPositions 可能滞后于 selectedTabIndex 参数，若 selectedIndex 越界会触发
     // IndexOutOfBoundsException（M3 默认 indicator 仅检查 isNotEmpty，未检查 size）。
-    val selectedIndex = activeTabs.indexOfFirst { it.id == selectedKbId }
-        .let { if (it < 0) 0 else it.coerceAtMost(activeTabs.lastIndex) }
+    val selectedIndex = activeFolders.indexOfFirst { it.id == selectedFolderId }
+        .let { if (it < 0) 0 else it.coerceAtMost(activeFolders.lastIndex) }
     val hapticFeedback = LocalHapticFeedback.current
 
     Row(
@@ -701,16 +701,16 @@ private fun KnowledgeTabRow(
             // 选中下划线改由每个 Tab 自身的 drawBehind 绘制，无需依赖 indicator API，更稳健。
             indicator = {},
         ) {
-            activeTabs.forEachIndexed { index, tab ->
+            activeFolders.forEachIndexed { index, folder ->
                 // 给每个 Tab 稳定 key，避免增删 Tab 时 SubcomposeLayout 复用错位
-                key(tab.id) {
+                key(folder.id) {
                     val selected = index == selectedIndex
                     Tab(
                         selected = selected,
-                        onClick = { onTabSelected(tab.id) },
+                        onClick = { onFolderSelected(folder.id) },
                         text = {
                             Text(
-                                text = tab.name.ifBlank { tab.id },
+                                text = folder.name.ifBlank { folder.id },
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 // 选中标签：主色 + 加粗；未选中：次要色 + 常规字重，形成明显区分
@@ -744,11 +744,11 @@ private fun KnowledgeTabRow(
                                     )
                                 }
                             }
-                            .pointerInput(tab.id) {
+                            .pointerInput(folder.id) {
                                 detectTapGestures(
                                     onLongPress = {
                                         hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        onTabLongPress(tab)
+                                        onFolderLongPress(folder)
                                     },
                                 )
                             },
@@ -759,7 +759,7 @@ private fun KnowledgeTabRow(
         IconButton(onClick = onAddClick) {
             Icon(
                 imageVector = Icons.Default.Add,
-                contentDescription = "添加知识库标签",
+                contentDescription = "添加文件夹标签",
             )
         }
     }
@@ -768,48 +768,48 @@ private fun KnowledgeTabRow(
 /**
  * 「+」号弹出的添加 Tab 对话框。
  *
- * 从 [allKnowledgeBases] 中过滤掉已在主页展开的 [activeTabs]，
- * 仅展示剩余可添加的知识库。空列表时给出提示文案。
+ * 从 [allFolders] 中过滤掉已在主页展开的 [activeFolders]，
+ * 仅展示剩余可添加的文件夹。空列表时给出提示文案。
  */
 @Composable
-private fun AddTabDialog(
-    allKnowledgeBases: List<KnowledgeBaseOption>,
-    activeTabs: List<KnowledgeBaseOption>,
-    onSelected: (KnowledgeBaseOption) -> Unit,
+private fun AddFolderDialog(
+    allFolders: List<FolderOption>,
+    activeFolders: List<FolderOption>,
+    onSelected: (FolderOption) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val activeIds = activeTabs.map { it.id }.toSet()
-    val candidates = allKnowledgeBases.filter { it.id !in activeIds }
+    val activeIds = activeFolders.map { it.id }.toSet()
+    val candidates = allFolders.filter { it.id !in activeIds }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("添加知识库标签") },
+        title = { Text("添加文件夹标签") },
         text = {
             if (candidates.isEmpty()) {
                 Text(
-                    text = if (allKnowledgeBases.isEmpty()) {
-                        "暂无可选知识库，请先在设置中拉取知识库列表。"
+                    text = if (allFolders.isEmpty()) {
+                        "暂无可选文件夹，请先在设置中拉取文件夹列表。"
                     } else {
-                        "所有知识库都已添加到主页。"
+                        "所有文件夹都已添加到主页。"
                     },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
                 LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
-                    items(candidates, key = { it.id }) { kb ->
+                    items(candidates, key = { it.id }) { folder ->
                         TextButton(
-                            onClick = { onSelected(kb) },
+                            onClick = { onSelected(folder) },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Column(modifier = Modifier.fillMaxWidth()) {
                                 Text(
-                                    text = kb.name.ifBlank { kb.id },
+                                    text = folder.name.ifBlank { folder.id },
                                     style = MaterialTheme.typography.bodyLarge,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 Text(
-                                    text = kb.id,
+                                    text = folder.id,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,

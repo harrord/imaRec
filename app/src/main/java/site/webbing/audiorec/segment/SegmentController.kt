@@ -13,10 +13,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import site.webbing.audiorec.FolderOption
 import site.webbing.audiorec.ImaSettings
 import site.webbing.audiorec.ImaUploader
 import site.webbing.audiorec.InspirationModeStore
-import site.webbing.audiorec.KnowledgeBaseOption
 import site.webbing.audiorec.RecordingFileManager
 import site.webbing.audiorec.RecordingService
 import site.webbing.audiorec.RecordingStatus
@@ -130,7 +130,7 @@ class SegmentController(
      *
      * 双击分段按钮进入：开新段继续录音，反馈行持续显示
      * "灵感开始记录，再次点击将存入 xx"，期间产生的录音（手动保存或自动分段）
-     * 一律归到灵感目标知识库 [ImaConfig.inspirationKbId]，且不受 10 秒上传限制。
+     * 一律归到灵感目标文件夹 [ImaConfig.inspirationFolderId]，且不受 10 秒上传限制。
      * 再次点击分段按钮（单击/双击均识别为单击）保存灵感录音并回到普通模式。
      */
     private var inspirationMode = false
@@ -327,7 +327,7 @@ class SegmentController(
             startSamplingLoop()
             // 灵感模式下恢复录音后，通知重建会清除反馈行，重新显示灵感提示
             if (inspirationMode) {
-                onGroupFeedback?.invoke("灵感开始记录，再次点击将存入 ${inspirationKbName()}")
+                onGroupFeedback?.invoke("灵感开始记录，再次点击将存入 ${inspirationFolderName()}")
             }
         } catch (e: RuntimeException) {
             Log.e(TAG, "resume failed", e)
@@ -342,8 +342,8 @@ class SegmentController(
      * - 普通模式 + 第一次点击：启动 [DOUBLE_CLICK_WINDOW_MS] 延迟计时，期间无第二次点击
      *   则视为单击执行普通分段；有第二次点击则触发双击。
      * - 普通模式 + 1 秒内第二次点击（双击）：
-     *   - 灵感目标知识库已配置：执行一次普通分段（截断保存当前段），然后进入灵感模式。
-     *   - 灵感目标知识库未配置：双击识别为单击，仅执行一次普通分段，不进入灵感模式。
+     *   - 灵感目标文件夹已配置：执行一次普通分段（截断保存当前段），然后进入灵感模式。
+     *   - 灵感目标文件夹未配置：双击识别为单击，仅执行一次普通分段，不进入灵感模式。
      *
      * 仅在 Recording 阶段有效；Paused / Monitoring / Idle 忽略。
      */
@@ -362,12 +362,12 @@ class SegmentController(
             segmentClickJob?.cancel()
             segmentClickJob = null
             val config = imaSettings.config.value
-            if (config.inspirationKbId.isNotBlank()) {
-                // 已配置灵感 KB：执行一次普通分段 + 进入灵感模式
+            if (config.inspirationFolderId.isNotBlank()) {
+                // 已配置灵感文件夹：执行一次普通分段 + 进入灵感模式
                 performManualSegment()
                 enterInspirationMode()
             } else {
-                // 未配置灵感 KB：双击识别为单击，仅执行一次普通分段
+                // 未配置灵感文件夹：双击识别为单击，仅执行一次普通分段
                 performManualSegment()
             }
         } else {
@@ -393,12 +393,12 @@ class SegmentController(
         segmentFeedbackJob = null
         pauseSelectJob?.cancel()
         pauseSelectJob = null
-        manualSegmentInternal(retagKbId = null)
-        // 分段完成后显示反馈行：当前片段保存到的知识库。startNewSegment 内部会
+        manualSegmentInternal(retagFolderId = null)
+        // 分段完成后显示反馈行：当前片段保存到的文件夹。startNewSegment 内部会
         // 先 publishStatus(Recording) 触发一次无反馈行的通知重建，此处再以反馈文本
         // 重建一次，反馈行最终可见。
-        val kbName = currentKbName()
-        onGroupFeedback?.invoke("录音片段已保存到「$kbName」")
+        val folderName = currentFolderName()
+        onGroupFeedback?.invoke("录音片段已保存到「$folderName」")
         segmentFeedbackJob = scope.launch {
             delay(SEGMENT_FEEDBACK_DURATION_MS)
             onGroupFeedback?.invoke(null)
@@ -416,25 +416,25 @@ class SegmentController(
         // 取消普通分段可能挂起的 5 秒反馈清除，避免灵感提示被清掉
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
-        val kbName = inspirationKbName()
-        onGroupFeedback?.invoke("灵感开始记录，再次点击将存入 $kbName")
+        val folderName = inspirationFolderName()
+        onGroupFeedback?.invoke("灵感开始记录，再次点击将存入 $folderName")
     }
 
     /**
-     * 灵感模式下保存当前段到灵感目标知识库并回到普通模式。
+     * 灵感模式下保存当前段到灵感目标文件夹并回到普通模式。
      *
-     * - 把当前段 retag 到灵感 KB ID（同步文件名标签与上传目标）
+     * - 把当前段 retag 到灵感文件夹 ID（同步文件名标签与上传目标）
      * - 不受 10 秒限制，无论时长都上传
-     * - 上传目标指向灵感 KB（[ImaUploader.enqueueUpload] 传入 overrideKbId）
-     * - 若灵感 KB 不在主页 activeTabs 则新建并选中该 Tab
+     * - 上传目标指向灵感文件夹（[ImaUploader.enqueueUpload] 传入 overrideFolderId）
+     * - 若灵感文件夹不在主页 activeFolders 则新建并选中该 Tab
      * - 开新段继续录音，回到普通模式，反馈行显示保存结果 5 秒后恢复默认
      */
     private fun saveInspirationSegment() {
         inspirationMode = false
         InspirationModeStore.update(false)
         val config = imaSettings.config.value
-        val inspirationKbId = config.inspirationKbId
-        val kbName = config.inspirationKbName.ifBlank { inspirationKbId }
+        val inspirationFolderId = config.inspirationFolderId
+        val folderName = config.inspirationFolderName.ifBlank { inspirationFolderId }
 
         // 取消可能挂起的任务
         segmentClickJob?.cancel()
@@ -446,17 +446,17 @@ class SegmentController(
         pauseSelectJob?.cancel()
         pauseSelectJob = null
 
-        // 落盘并上传到灵感 KB（不受 10 秒限制）
-        finalizeInspirationSegment(inspirationKbId)
+        // 落盘并上传到灵感文件夹（不受 10 秒限制）
+        finalizeInspirationSegment(inspirationFolderId)
 
-        // 新建并选中灵感 KB Tab（若不存在），使用户打开 App 即可看到灵感录音
-        imaSettings.addTabAndSelect(KnowledgeBaseOption(id = inspirationKbId, name = kbName))
+        // 新建并选中灵感文件夹 Tab（若不存在），使用户打开 App 即可看到灵感录音
+        imaSettings.addFolderAndSelect(FolderOption(id = inspirationFolderId, name = folderName))
 
         // 开新段继续录音
         startNewSegment(reason = "灵感保存")
 
         // 显示保存结果反馈，5 秒后清除
-        onGroupFeedback?.invoke("灵感已保存到「$kbName」")
+        onGroupFeedback?.invoke("灵感已保存到「$folderName」")
         segmentFeedbackJob = scope.launch {
             delay(SEGMENT_FEEDBACK_DURATION_MS)
             onGroupFeedback?.invoke(null)
@@ -464,10 +464,10 @@ class SegmentController(
     }
 
     /**
-     * 灵感片段落盘 + 上传：retag 到灵感 KB，跳过 10 秒限制，上传目标指向灵感 KB。
-     * 与 [finalizeAndUploadCurrent] 的区别：不检查最小时长，且强制上传到指定 KB。
+     * 灵感片段落盘 + 上传：retag 到灵感文件夹，跳过 10 秒限制，上传目标指向灵感文件夹。
+     * 与 [finalizeAndUploadCurrent] 的区别：不检查最小时长，且强制上传到指定文件夹。
      */
-    private fun finalizeInspirationSegment(inspirationKbId: String) {
+    private fun finalizeInspirationSegment(inspirationFolderId: String) {
         val file = currentFile
         val recorder = mediaRecorder
         try {
@@ -480,77 +480,77 @@ class SegmentController(
             mediaRecorder = null
         }
         if (file != null && file.exists() && file.length() > 0) {
-            // 把文件名 KB 标签重写为灵感 KB，同步本地列表归属与上传目标
-            val finalFile = fileManager.retagKbId(file, inspirationKbId)
-            // 灵感录音不受 10 秒限制，直接上传到灵感 KB
-            uploader.enqueueUpload(finalFile, inspirationKbId)
+            // 把文件名 folder 标签重写为灵感文件夹，同步本地列表归属与上传目标
+            val finalFile = fileManager.retagFolderId(file, inspirationFolderId)
+            // 灵感录音不受 10 秒限制，直接上传到灵感文件夹
+            uploader.enqueueUpload(finalFile, inspirationFolderId)
         }
         currentFile = null
     }
 
-    /** 获取灵感目标知识库的显示名称，未配置时返回"未设置"。 */
-    private fun inspirationKbName(): String {
+    /** 获取灵感目标文件夹的显示名称，未配置时返回"未设置"。 */
+    private fun inspirationFolderName(): String {
         val config = imaSettings.config.value
-        return config.inspirationKbName.takeIf { it.isNotBlank() }
-            ?: config.inspirationKbId.takeIf { it.isNotBlank() }
+        return config.inspirationFolderName.takeIf { it.isNotBlank() }
+            ?: config.inspirationFolderId.takeIf { it.isNotBlank() }
             ?: "未设置"
     }
 
     /**
      * 分段的实际执行体：落盘当前段 + 开新段。
      *
-     * @param retagKbId 非空时，把当前段文件名中的 KB ID 重写为此值后再上传。
-     *                  仅分组按钮 5 秒倒计时到点这条路径传入（切到新 KB 后，让当前段归到新 KB）；
-     *                  其他路径传 null，文件名保持创建时的 KB 不变。
+     * @param retagFolderId 非空时，把当前段文件名中的文件夹 ID 重写为此值后再上传。
+     *                      仅分组按钮 5 秒倒计时到点这条路径传入（切到新文件夹后，让当前段归到新文件夹）；
+     *                      其他路径传 null，文件名保持创建时的文件夹不变。
      */
-    private fun manualSegmentInternal(retagKbId: String?) {
+    private fun manualSegmentInternal(retagFolderId: String?) {
         samplingJob?.cancel()
         samplingJob = null
-        finalizeAndUploadCurrent(retagKbId)
+        finalizeAndUploadCurrent(retagFolderId)
         startNewSegment(reason = "手动分段")
     }
 
     /**
-     * 获取当前选中知识库的显示名称，用于分段后反馈提示当前片段归属。
-     * 未选择知识库或名称为空时返回"未分类"。
+     * 获取当前选中文件夹的显示名称，用于分段后反馈提示当前片段归属。
+     * 未选择文件夹或名称为空时返回"未分类"（上传到知识库根目录）。
      */
-    private fun currentKbName(): String {
+    private fun currentFolderName(): String {
         val config = imaSettings.config.value
-        return config.activeTabs.firstOrNull { it.id == config.knowledgeBaseId }
+        return config.activeFolders.firstOrNull { it.id == config.currentFolderId }
             ?.name
             ?.takeIf { it.isNotBlank() }
             ?: "未分类"
     }
 
     /**
-     * 切换知识库并启动 5 秒后台倒计时，到点后执行分段。
+     * 切换文件夹并启动 5 秒后台倒计时，到点后执行分段。
      *
      * 行为：
-     * - 在主页已展开 Tab（activeTabs）之间循环切换到下一个知识库
-     * - 每次点击都弹 Toast 提示当前选中 KB 与 5 秒后自动分段
+     * - 在主页已展开 Tab（activeFolders）之间循环切换到下一个文件夹
+     * - 每次点击都弹 Toast 提示当前选中文件夹与 5 秒后自动分段
      * - 在通知按钮行下方临时显示反馈行（锁屏可见，弥补 Toast 在锁屏可能不弹的限制）
-     * - 5 秒内再次点击：取消上一个倒计时、切换到下一个 KB、重启倒计时
-     * - 5 秒内无再点击：清除反馈行并执行分段（上传当前段 + 用新 KB 开新段）；
-     *   到点时把当前段文件名重打为切换后的新 KB，使落盘归属与上传目标一致
+     * - 5 秒内再次点击：取消上一个倒计时、切换到下一个文件夹、重启倒计时
+     * - 5 秒内无再点击：清除反馈行并执行分段（上传当前段 + 用新文件夹开新段）；
+     *   到点时把当前段文件名重打为切换后的新文件夹，使落盘归属与上传目标一致
      *
-     * 仅在 Recording 阶段且 activeTabs ≥ 2 时有效；其他态或无可切换 KB 时忽略。
+     * 仅在 Recording 阶段且 activeFolders ≥ 2 时有效；其他态或无可切换文件夹时忽略。
      */
-    fun switchKnowledgeBase() {
+    fun switchFolder() {
         if (phase != Phase.Recording) return
-        val tabs = imaSettings.config.value.activeTabs
-        if (tabs.size < 2) return
+        val folders = imaSettings.config.value.activeFolders
+        if (folders.size < 2) return
         // 分组按钮接管，取消分段按钮可能挂起的双击检测
         segmentClickJob?.cancel()
         segmentClickJob = null
-        val currentId = imaSettings.config.value.knowledgeBaseId
-        val currentIndex = tabs.indexOfFirst { it.id == currentId }
-        val nextIndex = if (currentIndex < 0) 0 else (currentIndex + 1) % tabs.size
-        val next = tabs[nextIndex]
-        imaSettings.selectTab(next.id)
+        val currentId = imaSettings.config.value.currentFolderId
+        val currentIndex = folders.indexOfFirst { it.id == currentId }
+        val nextIndex = if (currentIndex < 0) 0 else (currentIndex + 1) % folders.size
+        val next = folders[nextIndex]
+        imaSettings.selectFolder(next.id)
 
         Toast.makeText(
             service,
-            "连续点击以切换保存的知识库。当前选择的「${next.name}」，5 秒后自动执行分段",
+            "连续点击以切换保存的文件夹。当前选择的「${next.name}」，5 秒后自动执行分段",
             Toast.LENGTH_SHORT,
         ).show()
         onGroupFeedback?.invoke("当前选中：${next.name}，5 秒后自动分段")
@@ -565,10 +565,10 @@ class SegmentController(
             onGroupFeedback?.invoke(null)
             // 倒计时期间状态可能变化（暂停/停止会取消本协程，这里只是防御性检查）
             if (phase != Phase.Recording) return@launch
-            // 把当前段（在旧 KB 下开始录的）重打为切换后的新 KB，
+            // 把当前段（在旧文件夹下开始录的）重打为切换后的新文件夹，
             // 使落盘文件名标签与上传目标、本地列表归属一致
-            val newKbId = imaSettings.config.value.knowledgeBaseId
-            manualSegmentInternal(retagKbId = newKbId)
+            val newFolderId = imaSettings.config.value.currentFolderId
+            manualSegmentInternal(retagFolderId = newFolderId)
         }
     }
 
@@ -615,10 +615,10 @@ class SegmentController(
     /** 开始一个新片段：创建文件、启动 MediaRecorder、进入 Recording 阶段。 */
     private fun startNewSegment(reason: String?) {
         lastEndReason = reason
-        // 取当前选中的知识库 ID 嵌入文件名，作为后续列表过滤的归属标识。
-        // 未选择知识库时为空串，文件名退化为旧格式（无 _kb 后缀），归类为「未分类」。
-        val kbId = imaSettings.config.value.knowledgeBaseId
-        val file = fileManager.createRecordingFile(kbId)
+        // 取当前选中的文件夹 ID 嵌入文件名，作为后续列表过滤的归属标识。
+        // 未选择文件夹时为空串，文件名退化为无 _f 后缀格式，归类为「未分类」（上传到知识库根目录）。
+        val folderId = imaSettings.config.value.currentFolderId
+        val file = fileManager.createRecordingFile(folderId)
         val recorder = createMediaRecorder().apply {
             setAudioSource(MediaRecorder.AudioSource.MIC)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
@@ -751,14 +751,14 @@ class SegmentController(
                 val engineRef = engine
                 if (engineRef != null && engineRef.evaluateEnd(ctx) == SegmentAction.EndCurrent) {
                     if (inspirationMode) {
-                        // 灵感模式下不进入间隔期，直接落盘当前段（归灵感 KB）+ 开新段继续灵感录音。
+                        // 灵感模式下不进入间隔期，直接落盘当前段（归灵感文件夹）+ 开新段继续灵感录音。
                         // 这样用户在灵感期间安静一会儿也不会中断，无需步数变化即可继续。
                         samplingJob?.cancel()
                         samplingJob = null
                         finalizeAndUploadCurrent()
                         startNewSegment(reason = "灵感分段")
                         // startNewSegment 触发的通知重建会清除反馈行，重新显示灵感提示
-                        onGroupFeedback?.invoke("灵感开始记录，再次点击将存入 ${inspirationKbName()}")
+                        onGroupFeedback?.invoke("灵感开始记录，再次点击将存入 ${inspirationFolderName()}")
                     } else {
                         enterMonitoring(reason = "安静持续")
                     }
@@ -771,15 +771,15 @@ class SegmentController(
     /**
      * 停止 MediaRecorder 并把当前文件加入上传队列。过短的片段保留到本地但不上传。
      *
-     * 灵感模式下（[inspirationMode] 为 true）：当前段 retag 到灵感 KB 并跳过 10 秒限制，
-     * 上传目标指向灵感 KB。覆盖自动分段进入间隔期、上传限制触发分段等路径。
+     * 灵感模式下（[inspirationMode] 为 true）：当前段 retag 到灵感文件夹并跳过 10 秒限制，
+     * 上传目标指向灵感文件夹。覆盖自动分段进入间隔期、上传限制触发分段等路径。
      *
-     * @param retagKbId 非空时，在 recorder.stop() 关闭文件后，把文件名中的 KB ID
-     *                  重写为此值（rename 磁盘文件）再读时长/入队上传。仅分组按钮
-     *                  5 秒倒计时到点这条路径传入；其他路径传 null 保持原文件名。
-     *                  灵感模式下此参数被忽略，统一使用灵感 KB ID。
+     * @param retagFolderId 非空时，在 recorder.stop() 关闭文件后，把文件名中的文件夹 ID
+     *                      重写为此值（rename 磁盘文件）再读时长/入队上传。仅分组按钮
+     *                      5 秒倒计时到点这条路径传入；其他路径传 null 保持原文件名。
+     *                      灵感模式下此参数被忽略，统一使用灵感文件夹 ID。
      */
-    private fun finalizeAndUploadCurrent(retagKbId: String? = null) {
+    private fun finalizeAndUploadCurrent(retagFolderId: String? = null) {
         val file = currentFile
         val recorder = mediaRecorder
         try {
@@ -793,13 +793,13 @@ class SegmentController(
             mediaRecorder = null
         }
         if (file != null && file.exists() && file.length() > 0) {
-            // 灵感模式下统一归到灵感 KB；否则按调用方传入的 retagKbId 重打标签
-            val effectiveKbId = if (inspirationMode) {
-                imaSettings.config.value.inspirationKbId
+            // 灵感模式下统一归到灵感文件夹；否则按调用方传入的 retagFolderId 重打标签
+            val effectiveFolderId = if (inspirationMode) {
+                imaSettings.config.value.inspirationFolderId
             } else {
-                retagKbId
+                retagFolderId
             }
-            val finalFile = if (effectiveKbId != null) fileManager.retagKbId(file, effectiveKbId) else file
+            val finalFile = if (effectiveFolderId != null) fileManager.retagFolderId(file, effectiveFolderId) else file
             val durationMs = getSegmentDurationMs(finalFile)
             if (!inspirationMode && durationMs < MIN_SEGMENT_DURATION_MS) {
                 // 普通模式：10 秒以内的片段保留到本地，但不上传。
@@ -812,9 +812,9 @@ class SegmentController(
                     Toast.LENGTH_SHORT,
                 ).show()
             } else {
-                // 灵感模式上传到灵感 KB；普通模式上传到当前 config 的默认 KB
-                val uploadKbId = if (inspirationMode) effectiveKbId else null
-                uploader.enqueueUpload(finalFile, uploadKbId)
+                // 灵感模式上传到灵感文件夹；普通模式上传到当前 config 的当前选中文件夹
+                val uploadFolderId = if (inspirationMode) effectiveFolderId else null
+                uploader.enqueueUpload(finalFile, uploadFolderId)
             }
         }
         currentFile = null
