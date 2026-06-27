@@ -64,6 +64,11 @@ class SegmentController(
     private var currentFile: File? = null
     private var lastEndReason: String? = null
 
+    /** 当前片段累计实际录音时长（不含暂停间隔），用于触发上传时长限制的分段。 */
+    private var segmentRecordedMs = 0L
+    /** 上一次采样时间戳，用于在采样循环中累计实际录音时长；0 表示需重新基准。 */
+    private var lastSampleMs = 0L
+
     private var samplingJob: Job? = null
     private val dbWindow1s = DbWindowBuffer()
     private val dbWindow5s = DbWindowBuffer()
@@ -212,6 +217,7 @@ class SegmentController(
         currentFile = file
         segmentIndex++
         segmentStartMs = System.currentTimeMillis()
+        segmentRecordedMs = 0L
         phase = Phase.Recording
         engine?.onSegmentStart()
         dbWindow1s.clear()
@@ -264,6 +270,7 @@ class SegmentController(
     /** 正式片段采样循环：读 getMaxAmplitude → dB → 驱动结束条件求值。 */
     private fun startSamplingLoop() {
         samplingJob?.cancel()
+        lastSampleMs = 0L
         samplingJob = scope.launch {
             while (isActive && phase == Phase.Recording) {
                 delay(SAMPLE_INTERVAL_MS)
@@ -278,6 +285,21 @@ class SegmentController(
                 AudioLevelStore.update(db)
 
                 val now = System.currentTimeMillis()
+                // 累计实际录音时长（不含暂停间隔），暂停后由 startSamplingLoop 重置基准
+                if (lastSampleMs > 0) {
+                    segmentRecordedMs += (now - lastSampleMs)
+                }
+                lastSampleMs = now
+                // 上传硬性限制：文件大小 ≥ 198MB 或实际录音时长 ≥ 1小时59分时立即分段，
+                // 确保每段都满足 200MB / 2 小时的上传约束（留 2MB / 1 分钟余量）
+                val fileSize = currentFile?.length() ?: 0L
+                if (fileSize >= MAX_SEGMENT_SIZE_BYTES || segmentRecordedMs >= MAX_SEGMENT_DURATION_MS) {
+                    samplingJob?.cancel()
+                    samplingJob = null
+                    finalizeAndUploadCurrent()
+                    startNewSegment(reason = "超过上传限制")
+                    break
+                }
                 dbWindow1s.add(now, db, 1_000)
                 dbWindow5s.add(now, db, 5_000)
                 val ctx = ConditionContext(
@@ -478,5 +500,9 @@ class SegmentController(
         private const val STOP_CHECK_INTERVAL_MS = 30_000L
         /** 片段最小上传时长，低于此值的片段保留到本地但不上传。 */
         private const val MIN_SEGMENT_DURATION_MS = 10_000L
+        /** 单段文件大小上限（198MB），超过立即分段以符合 200MB 上传限制。 */
+        private const val MAX_SEGMENT_SIZE_BYTES = 198L * 1024 * 1024
+        /** 单段录音时长上限（1小时59分），超过立即分段以符合 2 小时上传限制。 */
+        private const val MAX_SEGMENT_DURATION_MS = 119 * 60 * 1000L
     }
 }
