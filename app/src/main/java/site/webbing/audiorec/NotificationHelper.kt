@@ -6,15 +6,11 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Paint
 import android.os.Build
 import android.support.v4.media.session.MediaSessionCompat
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import kotlin.math.sin
 
 const val RECORDING_NOTIFICATION_ID = 1001
 private const val RECORDING_CHANNEL_ID = "recording_channel_v2"
@@ -24,12 +20,14 @@ private const val LEGACY_CHANNEL_ID = "recording_channel"
  * 录音通知构建器。
  *
  * 录音中 / 暂停态使用自定义 RemoteViews 三部分卡片：
- *   [声波 ImageView] —— [分段 Button] —— [暂停/继续 Button]
+ *   [状态 TextView] —— [分段 Button] —— [暂停/继续 Button]
  *
- * 声波为虚假动画：由 [RecordingService] 每 [WAVE_REFRESH_MS] 生成一帧波形 Bitmap，
- * 通过 [updateWaveBitmap] 刷新 ImageView。每帧仍会重建 RemoteViews 与 Notification，
- * 但刷新频率控制在 5fps（200ms），且 Notification 字段与状态切换时保持完全一致，
- * 避免部分安卓版本上出现按钮点击卡顿、锁屏卡片缩小再放大等兼容性问题。
+ * 状态文案仅在状态切换时通过 [updateRecordingNotification] 更新：
+ *   - 录音态显示 "人生记录中..."
+ *   - 暂停态显示 "人生记录暂停"
+ * 不再做周期性 notify() 刷新（原声波动画每 200ms 重建 RemoteViews，
+ * 会在用户点击过程中替换 View 层级，导致 ACTION_DOWN/UP 落不到同一 View，
+ * 按钮点击被吞掉）。现在 notify() 仅在状态真正变化时触发一次，按钮点击可靠。
  *
  * 按钮外观：
  * - 录音态：分段绿色、暂停绿色（"暂停"文案）
@@ -61,12 +59,12 @@ class NotificationHelper(private val context: Context) {
     }
 
     /**
-     * 构建录音通知。仅在状态变化时调用；声波动画期间用 [updateWaveBitmap] 增量刷新。
+     * 构建录音通知。仅在状态变化时调用；notify() 不再周期性触发，
+     * 避免按钮点击事件被 View 重建吞掉。
      */
     fun buildRecordingNotification(
         status: RecordingStatus,
         mediaSessionToken: MediaSessionCompat.Token? = null,
-        waveBitmap: Bitmap? = null,
     ): Notification {
         createChannel()
 
@@ -83,7 +81,7 @@ class NotificationHelper(private val context: Context) {
         when (status) {
             is RecordingStatus.Recording, is RecordingStatus.Paused -> {
                 val isPaused = status is RecordingStatus.Paused
-                val views = buildCardViews(isPaused, waveBitmap)
+                val views = buildCardViews(isPaused)
                 builder.setContentText(if (isPaused) "录音已暂停" else "正在录音")
                 builder.setCustomContentView(views)
                 builder.setCustomBigContentView(views)
@@ -109,60 +107,25 @@ class NotificationHelper(private val context: Context) {
     }
 
     /**
-     * 状态变化时重建完整通知。
+     * 状态变化时重建完整通知。这是唯一的 notify() 调用入口，
+     * 不再有周期性刷新，因此按钮点击事件不会被 View 重建打断。
      */
     fun updateRecordingNotification(
         status: RecordingStatus,
         mediaSessionToken: MediaSessionCompat.Token? = null,
-        waveBitmap: Bitmap? = null,
     ) {
         NotificationManagerCompat.from(context).notify(
             RECORDING_NOTIFICATION_ID,
-            buildRecordingNotification(status, mediaSessionToken, waveBitmap),
-        )
-    }
-
-    /**
-     * 刷新声波 ImageView 的 Bitmap。
-     *
-     * 必须复用 [buildCardViews] 重建完整 RemoteViews（而非仅 setImageViewBitmap）：
-     * NotificationManager.notify() 替换 setCustomContentView 时会整体重 inflate，
-     * 若从 XML 新建 RemoteViews，按钮文本/背景会被重置为 XML 默认值（"暂停"+绿色），
-     * 导致暂停后一帧内"继续"文案被覆盖回去。此处传入 [isPaused] 保证每帧都重新
-     * 应用正确的按钮文案、背景与点击意图。Bitmap 生成已在后台线程完成，此处仅做
-     * 轻量 RemoteViews setter，性能可接受。
-     *
-     * 关键兼容性修复：此处的 Notification 构建必须与 [buildRecordingNotification]
-     * 中 Recording/Paused 分支保持完全一致的字段集合（含 setContentTitle /
-     * setContentText / setCategory / setPriority / setForegroundServiceBehavior）。
-     * 若字段缺失，部分安卓版本（MIUI/EMUI/ColorOS 等）在 notify() 重 inflate
-     * 自定义 RemoteViews 时会短暂回退到默认布局，表现为卡片缩小再放大的闪烁。
-     */
-    fun updateWaveBitmap(bitmap: Bitmap, isPaused: Boolean) {
-        val views = buildCardViews(isPaused, bitmap)
-        NotificationManagerCompat.from(context).notify(
-            RECORDING_NOTIFICATION_ID,
-            NotificationCompat.Builder(context, RECORDING_CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-                .setContentTitle("imaRec")
-                .setContentText(if (isPaused) "录音已暂停" else "正在录音")
-                .setOngoing(true)
-                .setOnlyAlertOnce(true)
-                .setCategory(NotificationCompat.CATEGORY_SERVICE)
-                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-                .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-                .setCustomContentView(views)
-                .setCustomBigContentView(views)
-                .build(),
+            buildRecordingNotification(status, mediaSessionToken),
         )
     }
 
     // ── RemoteViews 构建 ──
 
-    private fun buildCardViews(isPaused: Boolean, waveBitmap: Bitmap?): RemoteViews =
+    private fun buildCardViews(isPaused: Boolean): RemoteViews =
         RemoteViews(context.packageName, R.layout.notification_recording).apply {
-            setImageViewBitmap(R.id.wave_image, waveBitmap)
+            // 状态文案：录音态显示"人生记录中..."，暂停态显示"人生记录暂停"
+            setTextViewText(R.id.status_text, if (isPaused) "人生记录暂停" else "人生记录中...")
             setTextViewText(R.id.toggle_button, if (isPaused) "继续" else "暂停")
             // 暂停态：继续按钮用琥珀色，分段按钮置灰禁用
             // 录音态：暂停按钮用绿色，分段按钮可用绿色
@@ -221,69 +184,5 @@ class NotificationHelper(private val context: Context) {
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-    }
-
-    companion object {
-        /**
-         * 声波动画刷新间隔（毫秒）。
-         *
-         * 200ms ≈ 5fps。过高的刷新频率（如 60ms/17fps）会导致 notify() 调用过载，
-         * 在部分安卓版本（尤其 13+）上触发系统限流，表现为按钮点击卡顿、
-         * 锁屏卡片短暂缩小再放大。5fps 对装饰性波形指示已足够流畅。
-         */
-        const val WAVE_REFRESH_MS = 200L
-
-        /**
-         * 生成第 [frameIndex] 帧的声波 Bitmap。
-         *
-         * 7 条圆角竖线，高度按正弦波动叠加随机扰动，[frameIndex] 递增形成连续跳动。
-         * [active] 为 false（暂停态）时绘制灰色静止条。
-         * 比 12 帧版本更密集的竖线 + 更短帧间隔，视觉更流畅。
-         */
-        fun generateWaveBitmap(frameIndex: Int, active: Boolean): Bitmap {
-            val width = 240
-            val height = 80
-            val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bmp)
-            val color = if (active) 0xFF4CAF50.toInt() else 0xFF9E9E9E.toInt()
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                this.color = color
-                style = Paint.Style.FILL
-            }
-
-            val bars = 7
-            val barWidth = 16
-            val gap = 16
-            val totalWidth = bars * barWidth + (bars - 1) * gap
-            val startX = (width - totalWidth) / 2
-            val radius = (barWidth / 2f)
-
-            for (i in 0 until bars) {
-                val hRatio = if (active) {
-                    // 主正弦 + 次谐波 + 与帧/位置相关的扰动，模拟自然声波起伏
-                    val phase = 2.0 * Math.PI * (frameIndex / 12.0 + i * 0.15)
-                    val secondary = 2.0 * Math.PI * (frameIndex / 20.0 - i * 0.1)
-                    0.2 + 0.5 * (0.5 + 0.5 * sin(phase)) + 0.25 * (0.5 + 0.5 * sin(secondary))
-                } else {
-                    0.15
-                }
-                val safeRatio = hRatio.coerceIn(0.1, 0.95)
-                val barHeight = (height * safeRatio).toInt().coerceAtLeast(barWidth)
-                val left = startX + i * (barWidth + gap)
-                val top = (height - barHeight) / 2
-                val right = left + barWidth
-                val bottom = top + barHeight
-                canvas.drawRoundRect(
-                    left.toFloat(),
-                    top.toFloat(),
-                    right.toFloat(),
-                    bottom.toFloat(),
-                    radius,
-                    radius,
-                    paint,
-                )
-            }
-            return bmp
-        }
     }
 }
