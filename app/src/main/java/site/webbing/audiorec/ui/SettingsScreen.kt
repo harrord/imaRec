@@ -2,6 +2,7 @@ package site.webbing.audiorec.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -12,6 +13,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -48,9 +50,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import site.webbing.audiorec.FolderOption
 import site.webbing.audiorec.ImaSettings
 import site.webbing.audiorec.ImaUploader
+import site.webbing.audiorec.RecordingFile
+import site.webbing.audiorec.RecordingFileManager
 import site.webbing.audiorec.segment.SegmentConfig
 import site.webbing.audiorec.segment.SegmentSettings
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -64,6 +70,48 @@ fun SettingsScreen(
     val config by settings.config.collectAsStateWithLifecycle()
     val segmentSettings = remember { SegmentSettings.get(context) }
     val segmentConfig by segmentSettings.config.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    val fileManager = remember { RecordingFileManager(context) }
+
+    // 删除文件夹确认弹窗的状态：待删除的文件夹 + 该文件夹下将被删除的录音列表 + 加载标记
+    var pendingDeleteFolder by remember { mutableStateOf<FolderOption?>(null) }
+    var pendingDeleteRecordings by remember { mutableStateOf<List<RecordingFile>>(emptyList()) }
+    var pendingDeleteLoading by remember { mutableStateOf(false) }
+
+    // 用户点击删除按钮时：异步加载该文件夹下的录音文件列表用于在确认弹窗中展示
+    LaunchedEffect(pendingDeleteFolder) {
+        val folder = pendingDeleteFolder ?: return@LaunchedEffect
+        pendingDeleteLoading = true
+        pendingDeleteRecordings = withContext(Dispatchers.IO) {
+            fileManager.listRecordings(folder.id)
+        }
+        pendingDeleteLoading = false
+    }
+
+    if (pendingDeleteFolder != null) {
+        DeleteFolderDialog(
+            folder = pendingDeleteFolder!!,
+            recordings = pendingDeleteRecordings,
+            loading = pendingDeleteLoading,
+            onConfirm = {
+                val folder = pendingDeleteFolder!!
+                scope.launch {
+                    // 1. 删除该文件夹下的全部本地录音文件
+                    withContext(Dispatchers.IO) {
+                        fileManager.deleteRecordings(folder.id)
+                    }
+                    // 2. 从主页移除对应 Tab（同步 currentFolderId），持久化由 ImaSettings 负责
+                    settings.removeFolder(folder.id)
+                }
+                pendingDeleteFolder = null
+                pendingDeleteRecordings = emptyList()
+            },
+            onDismiss = {
+                pendingDeleteFolder = null
+                pendingDeleteRecordings = emptyList()
+            },
+        )
+    }
 
     Scaffold(
         modifier = modifier,
@@ -123,29 +171,35 @@ fun SettingsScreen(
 
             // ── 文件夹选择 ──
             // 重构后 APP 操作范围限定在同一个知识库内，主页 Tab 与上传目标均为文件夹。
-            // 此处选择"默认上传文件夹"：选中后加入主页 Tab 并切换为当前选中。
+            // 通过下方按钮搜索并添加文件夹：选中后加入主页 Tab 并切换为当前选中，并持久化到本地。
             Text(
                 text = "文件夹",
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(top = 8.dp),
             )
             Text(
-                text = "录音会上传到所选知识库的此文件夹中。主页 Tab 栏展示已添加的文件夹，可在录音中切换。",
+                text = "录音会上传到所选知识库的此文件夹中。主页 Tab 栏展示已添加的文件夹，可在录音中切换。删除文件夹会同步移除主页标签及该文件夹下的所有本地录音。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             FolderPicker(
-                selectedId = config.currentFolderId,
+                selectedId = "",
+                selectedName = "",
                 knowledgeBaseId = config.knowledgeBaseId,
+                buttonText = "点击搜索并添加文件夹",
                 onSelected = { id, name ->
-                    // 选中文件夹后加入主页 Tab 并切换为当前选中
+                    // 选中文件夹后加入主页 Tab 并切换为当前选中，持久化由 ImaSettings 负责
                     settings.addFolderAndSelect(FolderOption(id = id, name = name))
                 },
+            )
+            ActiveFolderList(
+                folders = config.activeFolders,
+                onDeleteClick = { folder -> pendingDeleteFolder = folder },
             )
 
             // ── 灵感目标文件夹 ──
             // 独立于默认上传文件夹：双击锁屏分段按钮进入灵感模式后，灵感期间的录音保存并上传到此文件夹。
-            // 仅更新灵感文件夹配置，不影响默认文件夹与主页 Tab 选中态。
+            // 仅更新灵感文件夹配置，不影响默认文件夹与主页 Tab 选中态。选中后名称会显示在按钮上。
             Text(
                 text = "灵感目标文件夹",
                 style = MaterialTheme.typography.titleMedium,
@@ -158,7 +212,9 @@ fun SettingsScreen(
             )
             FolderPicker(
                 selectedId = config.inspirationFolderId,
+                selectedName = config.inspirationFolderName,
                 knowledgeBaseId = config.knowledgeBaseId,
+                buttonText = "点击选择灵感目标文件夹",
                 onSelected = { id, name ->
                     settings.setInspirationFolder(id, name)
                 },
@@ -658,12 +714,15 @@ private fun KnowledgeBasePicker(
  * - 依赖 [knowledgeBaseId]：未配置知识库时提示先选 KB
  * - 通过 [ImaUploader.searchFolders] 按名称关键词搜索文件夹（文档推荐方法），
  *   因为 get_knowledge_list 实测不返回文件夹条目，仅返回文件
- * - 空文件夹名时显示 id；列表为空时给出提示
+ * - [selectedName] 非空时按钮显示名称，否则回退到 id，再否则显示 [buttonText]
+ * - 列表为空时给出提示
  */
 @Composable
 private fun FolderPicker(
     selectedId: String,
+    selectedName: String = "",
     knowledgeBaseId: String,
+    buttonText: String = "点击选择文件夹",
     onSelected: (id: String, name: String) -> Unit,
 ) {
     val context = LocalContext.current
@@ -676,8 +735,9 @@ private fun FolderPicker(
     var hasSearched by rememberSaveable { mutableStateOf(false) }
 
     val displayText = when {
+        selectedName.isNotBlank() -> "文件夹：$selectedName"
         selectedId.isNotBlank() -> "文件夹：$selectedId"
-        else -> "点击选择文件夹"
+        else -> buttonText
     }
 
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -806,4 +866,131 @@ private fun FolderPicker(
             },
         )
     }
+}
+
+/**
+ * 已添加文件夹列表：展示用户已添加为主页 Tab 的文件夹，每项提供删除入口。
+ *
+ * 删除操作不在此处直接执行，而是通过 [onDeleteClick] 回调交由上层弹出确认弹窗，
+ * 确认后才同步删除本地录音文件与主页 Tab。
+ */
+@Composable
+private fun ActiveFolderList(
+    folders: List<FolderOption>,
+    onDeleteClick: (FolderOption) -> Unit,
+) {
+    if (folders.isEmpty()) {
+        Text(
+            text = "尚未添加任何文件夹",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        return
+    }
+    Column(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Text(
+            text = "已添加的文件夹（${folders.size}）",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        folders.forEach { folder ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = folder.name.ifBlank { folder.id },
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
+                )
+                IconButton(onClick = { onDeleteClick(folder) }) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "删除文件夹",
+                        tint = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 删除文件夹确认弹窗。
+ *
+ * 展示将被删除的文件夹名称、该文件夹下将被删除的录音文件列表，
+ * 用户确认后由上层执行删除（删除本地录音文件 + 移除主页 Tab）。
+ */
+@Composable
+private fun DeleteFolderDialog(
+    folder: FolderOption,
+    recordings: List<RecordingFile>,
+    loading: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("删除文件夹") },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text("确定删除文件夹「${folder.name.ifBlank { folder.id }}」吗？")
+                Text(
+                    text = "此操作将同时移除主页对应的标签页，并删除该文件夹下的所有本地录音文件，不可恢复。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                when {
+                    loading -> Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 12.dp),
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                    recordings.isNotEmpty() -> {
+                        Text(
+                            text = "将被删除的录音文件（${recordings.size} 个）：",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 12.dp),
+                        )
+                        recordings.forEach { rec ->
+                            Text(
+                                text = "• ${rec.name}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(top = 2.dp),
+                            )
+                        }
+                    }
+                    else -> Text(
+                        text = "该文件夹下没有录音文件。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 12.dp),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                enabled = !loading,
+            ) { Text("删除", color = MaterialTheme.colorScheme.error) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
 }

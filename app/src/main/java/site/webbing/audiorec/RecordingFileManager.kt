@@ -109,6 +109,28 @@ class RecordingFileManager(private val context: Context) {
             }
     }
 
+    /**
+     * 删除指定文件夹下的全部已落盘录音文件。
+     *
+     * - [folderId] 非空：删除归属该文件夹的所有录音（按文件名中嵌入的 folder ID 精确匹配）
+     * - [folderId] 为空字符串：删除所有「未分类」录音（文件名中没有 folder ID 的文件）
+     *
+     * 正在写入的文件（Recording / Paused 状态下的当前片段）不会被删除，避免破坏正在进行的录音。
+     *
+     * 返回被成功删除的 [RecordingFile] 列表，供调用方做提示或日志。
+     */
+    fun deleteRecordings(folderId: String): List<RecordingFile> {
+        val targets = listRecordings(folderId)
+        val deleted = mutableListOf<RecordingFile>()
+        for (rec in targets) {
+            val file = File(rec.path)
+            if (file.exists() && file.delete()) {
+                deleted.add(rec)
+            }
+        }
+        return deleted
+    }
+
     private fun File.toRecordingFile(): RecordingFile =
         RecordingFile(
             name = name,
