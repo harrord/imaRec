@@ -44,8 +44,6 @@ dependencies {
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.media:media:1.7.0")
     implementation("androidx.activity:activity-compose:1.12.0-alpha04")
-    // 地理触发录音：FusedLocationProvider 单次定位
-    implementation("com.google.android.gms:play-services-location:21.3.0")
     // 地理触发录音：照片 EXIF GPS 解析
     implementation("androidx.exifinterface:exifinterface:1.4.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.1")

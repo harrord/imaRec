@@ -153,7 +153,13 @@ class RecordingService : Service() {
                 }
             }
             ACTION_GEO_TRIGGER_STOP -> {
-                if (controller.isActive) stopRecording()
+                android.util.Log.i("GeoTriggerDebug", "RecordingService: ACTION_GEO_TRIGGER_STOP received, isActive=${controller.isActive}")
+                if (controller.isActive) {
+                    android.util.Log.i("GeoTriggerDebug", "RecordingService: stopping recording due to geo leave")
+                    stopRecording()
+                } else {
+                    android.util.Log.i("GeoTriggerDebug", "RecordingService: not recording, ignore geo stop")
+                }
             }
         }
         return START_NOT_STICKY

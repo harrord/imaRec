@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.location.Location
 import android.os.Build
 import android.os.IBinder
@@ -17,11 +18,6 @@ import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import com.google.android.gms.location.CurrentLocationRequest
-import com.google.android.gms.location.FusedLocationProviderClient
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
-import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -30,8 +26,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlin.coroutines.resume
 
 /**
  * 地理触发录音：后台定时定位扫描前台服务。
@@ -41,7 +35,7 @@ import kotlin.coroutines.resume
  *
  * 工作模式：
  * - 启动时立即获取一次位置，之后按 [GeoTriggerConfig.scanIntervalMinutes] 循环
- * - 每次扫描用 [FusedLocationProviderClient.getCurrentLocation] 单次获取位置（省电）
+ * - 每次扫描用 [LocationHelper.requestFreshLocation] 单次获取位置（原生 LocationManager，不依赖 GMS）
  * - 找到在 [GeoTriggerConfig.radiusMeters] 范围内最近的预设地点：
  *   - 进入范围（且未触发过该地点）：强制分段+开新录音（文件名带地点备注），
  *     震动 + Toast「已到达 XX，开始新录音」，记录触发的地点 id
@@ -53,22 +47,33 @@ import kotlin.coroutines.resume
  */
 class LocationTriggerService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private lateinit var fusedClient: FusedLocationProviderClient
     private lateinit var settings: GeoTriggerSettings
+    private lateinit var prefs: SharedPreferences
     private var wakeLock: PowerManager.WakeLock? = null
     private var scanJob: Job? = null
 
-    /** 当前已触发（在范围内）的地点 id；null 表示未触发。用于防抖。 */
-    private var currentTriggeredLocationId: String? = null
+    /**
+     * 当前已触发（在范围内）的地点 id；null 表示未触发。用于防抖。
+     *
+     * 持久化到 SharedPreferences，服务被系统杀掉重启后从磁盘恢复，
+     * 避免 leave 检测条件永远为 false 导致无法停止录音。
+     */
+    private var currentTriggeredLocationId: String?
+        get() = prefs.getString(KEY_TRIGGERED_ID, null)
+        set(value) {
+            prefs.edit().putString(KEY_TRIGGERED_ID, value).apply()
+        }
 
     override fun onCreate() {
         super.onCreate()
-        fusedClient = LocationServices.getFusedLocationProviderClient(this)
         settings = GeoTriggerSettings.get(this)
+        prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         createChannel()
+        Log.i(DEBUG_TAG, "onCreate: restored triggeredId=${currentTriggeredLocationId}")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.i(DEBUG_TAG, "onStartCommand: action=${intent?.action}")
         startForeground(
             LOCATION_NOTIFICATION_ID,
             buildNotification(),
@@ -80,6 +85,7 @@ class LocationTriggerService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        Log.i(DEBUG_TAG, "onDestroy: service being destroyed (may be killed by system)")
         scanJob?.cancel()
         scanJob = null
         releaseWakeLock()
@@ -94,12 +100,16 @@ class LocationTriggerService : Service() {
         if (scanJob?.isActive == true) return
         acquireWakeLock()
         scanJob = scope.launch {
-            Log.d(TAG, "scan loop started")
+            Log.i(DEBUG_TAG, "scan loop started")
             // 启动时立即扫描一次
             while (isActive) {
+                // 每次扫描前续期 WakeLock，防止一次性 acquire 过期后息屏无法唤醒
+                acquireWakeLock()
+                Log.i(DEBUG_TAG, "scan loop: starting scanOnce")
                 runCatching { scanOnce() }
-                    .onFailure { Log.e(TAG, "scan failed", it) }
+                    .onFailure { Log.e(DEBUG_TAG, "scan loop: scanOnce failed", it) }
                 val intervalMin = settings.config.value.scanIntervalMinutes.coerceIn(1, 60)
+                Log.i(DEBUG_TAG, "scan loop: next scan in ${intervalMin} minutes")
                 delay(intervalMin * 60_000L)
             }
         }
@@ -117,37 +127,56 @@ class LocationTriggerService : Service() {
      */
     private suspend fun scanOnce() {
         val config = settings.config.value
+        val triggeredBefore = currentTriggeredLocationId
+        Log.i(
+            DEBUG_TAG,
+            "scanOnce: start, enabled=${config.enabled}, locations=${config.locations.size}, " +
+                "radius=${config.radiusMeters}m, leaveToStop=${config.leaveToStop}, " +
+                "triggeredId=$triggeredBefore",
+        )
         if (!config.enabled || config.locations.isEmpty()) {
+            Log.i(DEBUG_TAG, "scanOnce: skip (disabled or no locations)")
             GeoTriggerStateStore.update { it.copy(triggeredLabel = null) }
             currentTriggeredLocationId = null
             return
         }
 
         val location = getCurrentLocation() ?: run {
-            Log.d(TAG, "scanOnce: no location")
+            Log.w(DEBUG_TAG, "scanOnce: no location returned, skip this scan")
             return
         }
+        Log.i(
+            DEBUG_TAG,
+            "scanOnce: location got, lat=${location.latitude}, lng=${location.longitude}, " +
+                "accuracy=${location.accuracy}m, age=${System.currentTimeMillis() - location.time}ms",
+        )
 
         val radius = config.radiusMeters.toDouble()
-        val nearest = config.locations
-            .map { loc ->
-                val results = FloatArray(3)
-                Location.distanceBetween(
-                    location.latitude, location.longitude,
-                    loc.latitude, loc.longitude,
-                    results,
-                )
-                loc to results[0].toDouble()
-            }
+        // 计算所有地点的距离（用于诊断）
+        val allDistances = config.locations.map { loc ->
+            val results = FloatArray(3)
+            Location.distanceBetween(
+                location.latitude, location.longitude,
+                loc.latitude, loc.longitude,
+                results,
+            )
+            loc to results[0].toDouble()
+        }
+        allDistances.forEach { (loc, dist) ->
+            Log.i(DEBUG_TAG, "scanOnce: ${loc.label}(id=${loc.id}) dist=${dist}m inRadius=${dist <= radius}")
+        }
+
+        val nearest = allDistances
             .filter { it.second <= radius }
             .minByOrNull { it.second }
 
         if (nearest != null) {
             val (loc, dist) = nearest
+            Log.i(DEBUG_TAG, "scanOnce: nearest in range = ${loc.label}(${dist}m), triggeredId=$triggeredBefore")
             GeoTriggerStateStore.updateScan(loc.label, dist.toInt())
-            if (currentTriggeredLocationId != loc.id) {
+            if (triggeredBefore != loc.id) {
                 // 进入范围（防抖：未触发或已离开上一个触发点）
-                Log.d(TAG, "geo trigger enter: ${loc.label} dist=${dist}m")
+                Log.i(DEBUG_TAG, ">>> ENTER: ${loc.label} dist=${dist}m, starting new recording")
                 currentTriggeredLocationId = loc.id
                 GeoTriggerStateStore.setTriggered(loc.label)
                 RecordingService.triggerGeoSegment(this@LocationTriggerService, loc.label)
@@ -158,61 +187,47 @@ class LocationTriggerService : Service() {
                     Toast.LENGTH_SHORT,
                 ).show()
                 updateNotification()
+            } else {
+                Log.i(DEBUG_TAG, "scanOnce: already triggered this location, no action")
             }
         } else {
             // 计算最近距离供 UI 展示（即使不在范围内）
-            val closestAll = config.locations
-                .map { loc ->
-                    val results = FloatArray(3)
-                    Location.distanceBetween(
-                        location.latitude, location.longitude,
-                        loc.latitude, loc.longitude,
-                        results,
-                    )
-                    loc to results[0].toDouble()
-                }
-                .minByOrNull { it.second }
+            val closestAll = allDistances.minByOrNull { it.second }
             if (closestAll != null) {
+                Log.i(
+                    DEBUG_TAG,
+                    "scanOnce: out of range, closest=${closestAll.first.label}(${closestAll.second}m), " +
+                        "triggeredId=$triggeredBefore",
+                )
                 GeoTriggerStateStore.updateScan(closestAll.first.label, closestAll.second.toInt())
             }
-            if (currentTriggeredLocationId != null) {
+            if (triggeredBefore != null) {
                 // 离开范围
-                Log.d(TAG, "geo trigger leave")
+                Log.i(DEBUG_TAG, ">>> LEAVE: triggeredId=$triggeredBefore, leaveToStop=${config.leaveToStop}")
                 currentTriggeredLocationId = null
                 GeoTriggerStateStore.clearTriggered()
                 if (config.leaveToStop) {
+                    Log.i(DEBUG_TAG, ">>> LEAVE: calling RecordingService.triggerGeoStop")
                     RecordingService.triggerGeoStop(this@LocationTriggerService)
+                } else {
+                    Log.i(DEBUG_TAG, ">>> LEAVE: leaveToStop disabled, not stopping recording")
                 }
                 updateNotification()
+            } else {
+                Log.i(DEBUG_TAG, "scanOnce: out of range but was not triggered, no leave action")
             }
         }
     }
 
     /**
-     * 用 [FusedLocationProviderClient.getCurrentLocation] 获取单次位置。
+     * 用 [LocationHelper.requestFreshLocation] 获取单次位置。
      *
-     * 使用 [Priority.PRIORITY_BALANCED_POWER_ACCURACY] 平衡精度与功耗（城市级精度即可，
-     * 偏差范围默认 200m）。结果通过 [suspendCancellableCoroutine] 桥接为挂起函数。
-     * 若获取失败或被取消返回 null，调用方跳过本次扫描。
+     * 原生 LocationManager 实现，不依赖 GMS（国产 ROM 普遍缺失）。
+     * 并行请求 GPS + Network，10 秒超时，5 秒后用缓存兜底。
+     * 失败、超时或无可用 provider 时返回 null，调用方跳过本次扫描。
      */
-    private suspend fun getCurrentLocation(): android.location.Location? {
-        return suspendCancellableCoroutine { cont ->
-            val cts = CancellationTokenSource()
-            cont.invokeOnCancellation { cts.cancel() }
-            val request = CurrentLocationRequest.Builder()
-                .setPriority(Priority.PRIORITY_BALANCED_POWER_ACCURACY)
-                .setMaxUpdateAgeMillis(MAX_LOCATION_AGE_MS)
-                .build()
-            fusedClient.getCurrentLocation(request, cts.token)
-                .addOnSuccessListener { loc ->
-                    if (cont.isActive) cont.resume(loc)
-                }
-                .addOnFailureListener { e ->
-                    Log.e(TAG, "getCurrentLocation failed", e)
-                    if (cont.isActive) cont.resume(null)
-                }
-        }
-    }
+    private suspend fun getCurrentLocation(): Location? =
+        LocationHelper.requestFreshLocation(this)
 
     // ── 通知 ──
 
@@ -281,11 +296,19 @@ class LocationTriggerService : Service() {
 
     // ── WakeLock ──
 
+    /**
+     * 获取或续期 PARTIAL_WAKE_LOCK。
+     *
+     * 每次扫描前调用：若已持有则先释放再重新 acquire，
+     * 保证 WakeLock 不会因一次性过期（70 分钟）后无法唤醒息屏扫描。
+     * 单次 acquire 上限设为略大于最长扫描间隔（60 分钟 + 余量），
+     * 防止协程异常退出时 WakeLock 永久泄漏。
+     */
     private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == true) return
+        wakeLock?.let {
+            if (it.isHeld) it.release()
+        }
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        // 单次 acquire 上限设为略大于最长扫描间隔（60 分钟 + 余量），
-        // 防止协程异常退出时 WakeLock 永久泄漏
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
             "imaRec:geo_trigger_scan",
@@ -304,10 +327,14 @@ class LocationTriggerService : Service() {
 
     companion object {
         private const val TAG = "LocationTriggerService"
+        /** 诊断日志统一 TAG，用 `adb logcat -s GeoTriggerDebug` 过滤。 */
+        private const val DEBUG_TAG = "GeoTriggerDebug"
         private const val LOCATION_NOTIFICATION_ID = 2001
         private const val LOCATION_CHANNEL_ID = "geo_trigger_channel"
-        /** 接受最近一次缓存位置的时效（5 分钟），避免频繁唤醒 GPS。 */
-        private const val MAX_LOCATION_AGE_MS = 5 * 60 * 1000L
+
+        /** 持久化触发态用的 SharedPreferences 文件名与 key。 */
+        private const val PREFS_NAME = "geo_trigger_runtime"
+        private const val KEY_TRIGGERED_ID = "current_triggered_id"
 
         /**
          * 启动地理触发扫描服务。仅在 [GeoTriggerConfig.enabled] 开启时调用。

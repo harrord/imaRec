@@ -75,10 +75,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.google.android.gms.location.CurrentLocationRequest
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
-import com.google.android.gms.tasks.CancellationTokenSource
 import site.webbing.audiorec.CalendarCapsuleConfig
 import site.webbing.audiorec.CalendarCapsuleSettings
 import site.webbing.audiorec.CalendarScanService
@@ -96,11 +92,9 @@ import site.webbing.audiorec.segment.SegmentConfig
 import site.webbing.audiorec.segment.SegmentSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import java.util.UUID
-import kotlin.coroutines.resume
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1500,7 +1494,7 @@ private fun GeoLocationRow(
  * 添加地点弹窗：支持两种方式获取坐标。
  *
  * - 「从相册选照片」：调起系统图片选择器，解析 EXIF GPS；无 GPS 时 Toast 拒绝
- * - 「使用当前定位」：调起 FusedLocationProvider 获取当前位置
+ * - 「使用当前定位」：调起 LocationHelper（原生 LocationManager）获取当前位置
  * 解析成功后回显坐标，用户填写备注后确认保存。备注必填且清洗后不得为空。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1677,28 +1671,12 @@ private fun hasLocationPermission(context: android.content.Context): Boolean =
     ) == PackageManager.PERMISSION_GRANTED
 
 /**
- * 用 FusedLocationProvider 获取一次当前位置（挂起函数）。
- * 失败或取消时返回 null。
+ * 用 [LocationHelper.requestFreshLocation] 获取一次当前位置（挂起函数）。
+ * 原生 LocationManager 实现，不依赖 GMS。失败、超时或无可用 provider 时返回 null。
  */
 private suspend fun getCurrentLocationOnce(
     context: android.content.Context,
-): android.location.Location? {
-    val fusedClient = LocationServices.getFusedLocationProviderClient(context)
-    return suspendCancellableCoroutine { cont ->
-        val cts = CancellationTokenSource()
-        cont.invokeOnCancellation { cts.cancel() }
-        val request = CurrentLocationRequest.Builder()
-            .setPriority(Priority.PRIORITY_BALANCED_POWER_ACCURACY)
-            .setMaxUpdateAgeMillis(60_000L)
-            .build()
-        fusedClient.getCurrentLocation(request, cts.token)
-            .addOnSuccessListener { loc -> if (cont.isActive) cont.resume(loc) }
-            .addOnFailureListener { e ->
-                android.util.Log.e("AddLocationDialog", "getCurrentLocation failed", e)
-                if (cont.isActive) cont.resume(null)
-            }
-    }
-}
+): android.location.Location? = site.webbing.audiorec.LocationHelper.requestFreshLocation(context)
 
 // ── 闪念胶囊设置 ──
 
