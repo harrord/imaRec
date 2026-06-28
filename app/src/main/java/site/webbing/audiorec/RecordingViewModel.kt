@@ -44,7 +44,8 @@ data class RecordingUiState(
 
 class RecordingViewModel(application: Application) : AndroidViewModel(application) {
     private val fileManager = RecordingFileManager(application)
-    private val recordings = MutableStateFlow(fileManager.listRecordings())
+    // 初始为空列表，首次加载在 init 块的 config 收集器中异步完成（避免主线程磁盘 I/O）
+    private val recordings = MutableStateFlow<List<RecordingFile>>(emptyList())
     private val message = MutableStateFlow<String?>(null)
     private val audioPlayer = AudioPlayerController(
         scope = viewModelScope,
@@ -138,20 +139,24 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
      * 刷新录音列表。根据当前是否有 Tab 决定过滤策略：
      * - 有 Tab：按当前选中文件夹 ID 过滤；选中为空时显示「未分类」（根目录）
      * - 无 Tab：显示全部录音
+     *
+     * 文件扫描在 IO 线程执行，避免文件数量多时阻塞主线程导致 ANR。
      */
     fun refreshRecordings() {
-        val cfg = imaSettings.config.value
-        refreshRecordingsFor(cfg.currentFolderId, cfg.activeFolders)
+        viewModelScope.launch {
+            val cfg = imaSettings.config.value
+            refreshRecordingsFor(cfg.currentFolderId, cfg.activeFolders)
+        }
     }
 
-    private fun refreshRecordingsFor(selectedFolderId: String, activeFolders: List<FolderOption>) {
+    private suspend fun refreshRecordingsFor(selectedFolderId: String, activeFolders: List<FolderOption>) {
         val filterFolderId: String? = if (activeFolders.isEmpty()) {
             null // 无 Tab：显示全部
         } else {
             selectedFolderId // 有 Tab：严格按当前选中文件夹过滤（含空串 → 未分类/根目录）
         }
         Log.d(TAG, "refreshRecordingsFor: filterFolderId=$filterFolderId")
-        val list = fileManager.listRecordings(filterFolderId)
+        val list = withContext(Dispatchers.IO) { fileManager.listRecordings(filterFolderId) }
         Log.d(TAG, "refreshRecordingsFor: got ${list.size} files")
         recordings.value = list
     }
@@ -166,15 +171,22 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
 
     /**
      * 删除本地录音文件。若该文件正在播放，会先停止播放。
+     *
+     * 文件删除在 IO 线程执行，避免阻塞主线程。
      */
     fun deleteRecording(recording: RecordingFile) {
         if (PlaybackStateStore.status.value.activePath == recording.path) {
             audioPlayer.stop()
         }
-        val file = File(recording.path)
-        val deleted = file.exists() && file.delete()
-        refreshRecordings()
-        showMessage(if (deleted) "已删除「${recording.name}」" else "删除失败")
+        viewModelScope.launch {
+            val deleted = withContext(Dispatchers.IO) {
+                val file = File(recording.path)
+                file.exists() && file.delete()
+            }
+            val cfg = imaSettings.config.value
+            refreshRecordingsFor(cfg.currentFolderId, cfg.activeFolders)
+            showMessage(if (deleted) "已删除「${recording.name}」" else "删除失败")
+        }
     }
 
     /**

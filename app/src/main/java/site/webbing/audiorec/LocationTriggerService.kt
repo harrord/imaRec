@@ -26,6 +26,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 地理触发录音：后台定时定位扫描前台服务。
@@ -46,7 +47,9 @@ import kotlinx.coroutines.launch
  * 前台通知为低优先级常驻通知，文本显示扫描间隔与最近检查时间。
  */
 class LocationTriggerService : Service() {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    // 使用 Default 调度器：GPS 请求回调、距离计算、通知更新都不应在主线程执行，
+    // 否则地点数量多时会阻塞主线程导致 ANR。Toast 需单独切回 Main 线程。
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private lateinit var settings: GeoTriggerSettings
     private lateinit var prefs: SharedPreferences
     private var wakeLock: PowerManager.WakeLock? = null
@@ -98,16 +101,20 @@ class LocationTriggerService : Service() {
 
     private fun startScanLoop() {
         if (scanJob?.isActive == true) return
-        acquireWakeLock()
         scanJob = scope.launch {
             Log.i(DEBUG_TAG, "scan loop started")
             // 启动时立即扫描一次
             while (isActive) {
-                // 每次扫描前续期 WakeLock，防止一次性 acquire 过期后息屏无法唤醒
+                // 每次扫描前短时持有 WakeLock 保证 CPU 清醒（GPS 获取可能需要数秒），
+                // 扫描完立即释放，delay 等待期间不持有 WakeLock，让 CPU 能深度睡眠以省电
                 acquireWakeLock()
-                Log.i(DEBUG_TAG, "scan loop: starting scanOnce")
-                runCatching { scanOnce() }
-                    .onFailure { Log.e(DEBUG_TAG, "scan loop: scanOnce failed", it) }
+                try {
+                    Log.i(DEBUG_TAG, "scan loop: starting scanOnce")
+                    runCatching { scanOnce() }
+                        .onFailure { Log.e(DEBUG_TAG, "scan loop: scanOnce failed", it) }
+                } finally {
+                    releaseWakeLock()
+                }
                 val intervalMin = settings.config.value.scanIntervalMinutes.coerceIn(1, 60)
                 Log.i(DEBUG_TAG, "scan loop: next scan in ${intervalMin} minutes")
                 delay(intervalMin * 60_000L)
@@ -181,11 +188,13 @@ class LocationTriggerService : Service() {
                 GeoTriggerStateStore.setTriggered(loc.label)
                 RecordingService.triggerGeoSegment(this@LocationTriggerService, loc.label)
                 vibrate()
-                Toast.makeText(
-                    this@LocationTriggerService,
-                    "已到达 ${loc.label}，开始新录音",
-                    Toast.LENGTH_SHORT,
-                ).show()
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        this@LocationTriggerService,
+                        "已到达 ${loc.label}，开始新录音",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
                 updateNotification()
             } else {
                 Log.i(DEBUG_TAG, "scanOnce: already triggered this location, no action")
@@ -297,24 +306,21 @@ class LocationTriggerService : Service() {
     // ── WakeLock ──
 
     /**
-     * 获取或续期 PARTIAL_WAKE_LOCK。
+     * 获取 PARTIAL_WAKE_LOCK，仅在单次扫描期间持有。
      *
-     * 每次扫描前调用：若已持有则先释放再重新 acquire，
-     * 保证 WakeLock 不会因一次性过期（70 分钟）后无法唤醒息屏扫描。
-     * 单次 acquire 上限设为略大于最长扫描间隔（60 分钟 + 余量），
-     * 防止协程异常退出时 WakeLock 永久泄漏。
+     * 60 秒超时：GPS 获取最多 10 秒 + 距离计算和通知更新处理时间。
+     * 扫描完成后由 [releaseWakeLock] 立即释放，delay 等待期间不持有，
+     * 让 CPU 能进入深度睡眠以省电。超时兜底防止异常路径下 WakeLock 泄漏。
      */
     private fun acquireWakeLock() {
-        wakeLock?.let {
-            if (it.isHeld) it.release()
-        }
+        if (wakeLock?.isHeld == true) return
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
             "imaRec:geo_trigger_scan",
         ).apply {
             setReferenceCounted(false)
-            acquire(70 * 60 * 1000L)
+            acquire(60 * 1000L)
         }
     }
 

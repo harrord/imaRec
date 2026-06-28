@@ -22,6 +22,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -44,7 +45,9 @@ import java.util.Locale
  * 支持 [ACTION_REFRESH] action：收到后只刷新通知、不重启扫描循环。
  */
 class CalendarScanService : Service() {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    // 使用 Default 调度器：日历查询（ContentResolver）和笔记上传都是 I/O 密集型操作，
+    // 不应在主线程执行，否则事件数量多时会阻塞主线程导致 ANR。
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private lateinit var settings: CalendarCapsuleSettings
     private lateinit var imaSettings: ImaSettings
     private var wakeLock: PowerManager.WakeLock? = null
@@ -82,12 +85,18 @@ class CalendarScanService : Service() {
 
     private fun startScanLoop() {
         if (scanJob?.isActive == true) return
-        acquireWakeLock()
         scanJob = scope.launch {
             Log.d(TAG, "scan loop started")
             while (isActive) {
-                runCatching { scanOnce() }
-                    .onFailure { Log.e(TAG, "scan failed", it) }
+                // 每次扫描前短时持有 WakeLock 保证 CPU 清醒，扫描完立即释放，
+                // delay 等待期间不持有 WakeLock，让 CPU 能进入深度睡眠以省电
+                acquireWakeLock()
+                try {
+                    runCatching { scanOnce() }
+                        .onFailure { Log.e(TAG, "scan failed", it) }
+                } finally {
+                    releaseWakeLock()
+                }
                 val intervalMin = settings.config.value.scanIntervalMinutes.coerceIn(1, 5)
                 delay(intervalMin * 60_000L)
             }
@@ -114,11 +123,13 @@ class CalendarScanService : Service() {
         // 权限检测：无 READ_CALENDAR 时优雅停止服务 + Toast 提示
         if (!CalendarReader.hasReadCalendarPermission(this)) {
             Log.w(TAG, "scanOnce: no READ_CALENDAR permission, stopping service")
-            Toast.makeText(
-                this,
-                "缺少日历读取权限，闪念胶囊已停止",
-                Toast.LENGTH_LONG,
-            ).show()
+            withContext(Dispatchers.Main) {
+                Toast.makeText(
+                    this@CalendarScanService,
+                    "缺少日历读取权限，闪念胶囊已停止",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
             settings.setEnabled(false)
             stopSelf()
             return
@@ -264,14 +275,15 @@ class CalendarScanService : Service() {
     private fun acquireWakeLock() {
         if (wakeLock?.isHeld == true) return
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        // 单次 acquire 上限设为略大于最长扫描间隔（5 分钟 + 余量），
-        // 防止协程异常退出时 WakeLock 永久泄漏
+        // 30 秒超时：仅保证单次扫描期间 CPU 清醒，扫描完立即释放。
+        // delay 等待期间不持有 WakeLock，让 CPU 能深度睡眠以省电。
+        // 超时兜底防止异常路径下 WakeLock 泄漏。
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
             "imaRec:calendar_capsule_scan",
         ).apply {
             setReferenceCounted(false)
-            acquire(10 * 60 * 1000L)
+            acquire(30 * 1000L)
         }
     }
 

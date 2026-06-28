@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import site.webbing.audiorec.segment.SegmentController
 import site.webbing.audiorec.segment.SegmentSettings
 import site.webbing.audiorec.segment.StepSensorProvider
@@ -135,7 +136,7 @@ class RecordingService : Service() {
             }
             ACTION_MANUAL_SEGMENT -> {
                 performHapticFeedback()
-                controller.manualSegment()
+                scope.launch { controller.manualSegment() }
             }
             ACTION_SWITCH_KB -> {
                 performHapticFeedback()
@@ -145,7 +146,7 @@ class RecordingService : Service() {
                 val label = intent.getStringExtra(EXTRA_GEO_LABEL) ?: ""
                 if (controller.isActive) {
                     // 任何活跃状态（Recording/Paused/Monitoring）都强制分段+开新段带 label
-                    controller.forceSegmentByGeoTrigger(label)
+                    scope.launch { controller.forceSegmentByGeoTrigger(label) }
                 } else {
                     // Idle 态：设置 label 后启动新录音会话，文件名带 label
                     controller.setPendingGeoLabel(label)
@@ -169,7 +170,8 @@ class RecordingService : Service() {
 
     override fun onDestroy() {
         // 兜底：确保会话资源释放
-        if (controller.isActive) controller.stopSession()
+        // 使用 runBlocking 同步等待 stopSession 完成，确保 WakeLock/传感器在 scope.cancel 前释放
+        if (controller.isActive) runBlocking { controller.stopSession() }
         stopLockscreenRefresh()
         unregisterScreenOffReceiver()
         scope.cancel()
@@ -195,8 +197,9 @@ class RecordingService : Service() {
     }
 
     private fun stopRecording() {
-        controller.stopSession()
+        // 异步停止：文件 I/O（getSegmentDurationMs）在 IO 线程执行，不阻塞主线程
         // Controller 会在 stopSession 末尾 publish Idle，触发 onStatusUpdate 完成 stopForeground/stopSelf
+        scope.launch { controller.stopSession() }
     }
 
     private fun performHapticFeedback() {

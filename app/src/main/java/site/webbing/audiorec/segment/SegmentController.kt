@@ -9,10 +9,12 @@ import android.util.Log
 import android.widget.Toast
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import site.webbing.audiorec.FolderOption
 import site.webbing.audiorec.ImaSettings
 import site.webbing.audiorec.ImaUploader
@@ -356,7 +358,7 @@ class SegmentController(
      * 未配置灵感文件夹时按钮在通知层已禁用，不会进入此方法。
      * 仅在 Recording 阶段有效；Paused / Monitoring / Idle 忽略。
      */
-    fun manualSegment() {
+    suspend fun manualSegment() {
         if (phase != Phase.Recording) return
         if (inspirationMode) {
             saveInspirationSegment()
@@ -370,7 +372,7 @@ class SegmentController(
      * 执行一次普通手动分段（落盘当前段 + 开新段 + 5 秒反馈行）。
      * 取消分组/分段/暂停可能挂起的任务，避免与本次分段冲突。
      */
-    private fun performManualSegment() {
+    private suspend fun performManualSegment() {
         kbSwitchJob?.cancel()
         kbSwitchJob = null
         segmentFeedbackJob?.cancel()
@@ -503,7 +505,7 @@ class SegmentController(
      *                      仅分组按钮 5 秒倒计时到点这条路径传入（切到新文件夹后，让当前段归到新文件夹）；
      *                      其他路径传 null，文件名保持创建时的文件夹不变。
      */
-    private fun manualSegmentInternal(retagFolderId: String?) {
+    private suspend fun manualSegmentInternal(retagFolderId: String?) {
         samplingJob?.cancel()
         samplingJob = null
         finalizeAndUploadCurrent(retagFolderId)
@@ -587,7 +589,7 @@ class SegmentController(
      *
      * @param label 地点备注（未经清洗），内部会经 [RecordingFileManager.sanitizeLocationLabel] 清洗
      */
-    fun forceSegmentByGeoTrigger(label: String) {
+    suspend fun forceSegmentByGeoTrigger(label: String) {
         val cleanLabel = RecordingFileManager.sanitizeLocationLabel(label)
         pendingGeoLabel = cleanLabel
         cancelPendingSegmentJobsForGeo()
@@ -658,7 +660,7 @@ class SegmentController(
     }
 
     /** 结束整个会话：落盘当前片段并上传，释放所有资源。 */
-    fun stopSession() {
+    suspend fun stopSession() {
         samplingJob?.cancel()
         samplingJob = null
         stopTimerJob?.cancel()
@@ -722,7 +724,7 @@ class SegmentController(
             file.delete()
             Log.e(TAG, "start segment failed", e)
             // 录音引擎启动失败属于致命错误，结束会话
-            stopSession()
+            scope.launch { stopSession() }
             return
         }
 
@@ -741,7 +743,7 @@ class SegmentController(
     }
 
     /** 进入间隔期：结束当前片段并上传，启动 AudioMonitor 纯监测。 */
-    private fun enterMonitoring(reason: String) {
+    private suspend fun enterMonitoring(reason: String) {
         samplingJob?.cancel()
         samplingJob = null
         // 自动分段进入间隔期时，取消分组按钮可能挂起的 5 秒倒计时，避免与间隔期逻辑冲突
@@ -866,7 +868,7 @@ class SegmentController(
      *                      5 秒倒计时到点这条路径传入；其他路径传 null 保持原文件名。
      *                      灵感模式下此参数被忽略，统一使用灵感文件夹 ID。
      */
-    private fun finalizeAndUploadCurrent(retagFolderId: String? = null) {
+    private suspend fun finalizeAndUploadCurrent(retagFolderId: String? = null) {
         val file = currentFile
         val recorder = mediaRecorder
         try {
@@ -911,10 +913,13 @@ class SegmentController(
      * 获取片段时长（毫秒）。优先用 [MediaMetadataRetriever] 读取文件真实时长，
      * 这样暂停期间未写入的数据不会计入，判断最准确；读取失败时退回墙钟时间兜底，
      * 避免因读取异常误删有效数据（墙钟含暂停时间会偏长，倾向保守少丢弃）。
+     *
+     * 使用 withContext(Dispatchers.IO) 将文件 I/O 移出主线程，避免大文件或存储繁忙时
+     * 阻塞主线程导致 ANR。
      */
-    private fun getSegmentDurationMs(file: File): Long {
+    private suspend fun getSegmentDurationMs(file: File): Long = withContext(Dispatchers.IO) {
         val retriever = MediaMetadataRetriever()
-        return try {
+        try {
             retriever.setDataSource(file.absolutePath)
             retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                 ?.toLongOrNull()
@@ -1044,7 +1049,10 @@ class SegmentController(
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
             "imaRec::recording-wakelock",
-        ).also { it.acquire() }
+        ).also {
+            // 设置 4 小时上限，防止异常路径下 releaseWakeLock 未被调用导致 WakeLock 永久持有
+            it.acquire(4 * 60 * 60 * 1000L)
+        }
     }
 
     private fun releaseWakeLock() {
