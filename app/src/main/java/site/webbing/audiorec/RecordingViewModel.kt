@@ -32,6 +32,7 @@ data class RecordingUiState(
     val activeFolders: List<FolderOption> = emptyList(),
     val selectedFolderId: String = "",
     val allFolders: List<FolderOption> = emptyList(),
+    val geoTrigger: GeoTriggerRuntimeState = GeoTriggerRuntimeState(),
 ) {
     val isRecording: Boolean
         get() = recordingStatus !is RecordingStatus.Idle
@@ -54,32 +55,35 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
 
     @Suppress("UNCHECKED_CAST")
     val uiState: StateFlow<RecordingUiState> = combine(
-        RecordingStateStore.status,
-        recordings,
-        PlaybackStateStore.status,
-        message,
-        SegmentStateStore.info,
-        imaUploadStateStore.statusByFile,
-        imaUploadStateStore.sharedFiles,
-        imaSettings.config,
-    ) { values ->
-        val recordingFiles = values[1] as List<RecordingFile>
-        val uploadStatusByFile = values[5] as Map<String, ImaUploadStatus>
-        val sharedFiles = values[6] as Set<String>
-        val cfg = values[7] as ImaConfig
-        RecordingUiState(
-            recordingStatus = values[0] as RecordingStatus,
-            recordings = recordingFiles,
-            playback = values[2] as PlaybackStatus,
-            message = values[3] as String?,
-            segmentInfo = values[4] as SegmentInfo?,
-            uploadStatusByFile = uploadStatusByFile,
-            sharedFiles = sharedFiles,
-            activeFolders = cfg.activeFolders,
-            selectedFolderId = cfg.currentFolderId,
-            allFolders = cfg.allFolders,
-        )
-    }.stateIn(
+        combine(
+            RecordingStateStore.status,
+            recordings,
+            PlaybackStateStore.status,
+            message,
+            SegmentStateStore.info,
+            imaUploadStateStore.statusByFile,
+            imaUploadStateStore.sharedFiles,
+            imaSettings.config,
+        ) { values ->
+            val recordingFiles = values[1] as List<RecordingFile>
+            val uploadStatusByFile = values[5] as Map<String, ImaUploadStatus>
+            val sharedFiles = values[6] as Set<String>
+            val cfg = values[7] as ImaConfig
+            RecordingUiState(
+                recordingStatus = values[0] as RecordingStatus,
+                recordings = recordingFiles,
+                playback = values[2] as PlaybackStatus,
+                message = values[3] as String?,
+                segmentInfo = values[4] as SegmentInfo?,
+                uploadStatusByFile = uploadStatusByFile,
+                sharedFiles = sharedFiles,
+                activeFolders = cfg.activeFolders,
+                selectedFolderId = cfg.currentFolderId,
+                allFolders = cfg.allFolders,
+            )
+        },
+        GeoTriggerStateStore.state,
+    ) { state, geo -> state.copy(geoTrigger = geo) }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = RecordingUiState(recordings = recordings.value),

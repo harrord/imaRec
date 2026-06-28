@@ -155,6 +155,15 @@ class SegmentController(
 
     private var phase: Phase = Phase.Idle
 
+    /**
+     * 待消费的地理触发地点备注。由 [forceSegmentByGeoTrigger] 或
+     * [setPendingGeoLabel] 设置，下一次 [startNewSegment] 创建文件时嵌入文件名后清空。
+     *
+     * 普通录音路径不设置此字段，[startNewSegment] 传入空串，文件名退化为原格式，
+     * 保证非地理触发的录音文件名完全不变。
+     */
+    private var pendingGeoLabel: String = ""
+
     /** 是否正在录音会话中（含 Recording / Monitoring / Paused* / PauseSelecting）。 */
     val isActive: Boolean get() = phase != Phase.Idle
 
@@ -597,6 +606,96 @@ class SegmentController(
         }
     }
 
+    /**
+     * 地理触发强制分段：任何活跃状态都强制落盘当前段（含上传）+ 开新段，新段文件名带 [label]。
+     *
+     * 行为按当前阶段分流（spec「进入触发时的状态处理：任何状态都强制触发」）：
+     * - [Phase.Recording]：取消挂起的分段/分组/暂停任务，落盘当前段（普通模式遵守 10s 上传规则；
+     *   灵感模式按灵感逻辑保存到灵感文件夹），退出灵感模式，开新段带 label
+     * - [Phase.PauseSelecting] / [Phase.PausedForever] / [Phase.PausedTimed]：
+     *   直接结束当前段（recorder.stop）+ 开新段带 label（spec 建议方案）
+     * - [Phase.Monitoring]：停止间隔期 AudioMonitor，开新段带 label
+     * - [Phase.Idle]：仅设置 [pendingGeoLabel]，等待外部调用 [startSession] 启动新会话
+     *
+     * 触发动作与用户手动点击「分段」按钮效果等价（含上传、文件列表刷新），
+     * 且会安全打断暂停倒计时、灵感模式、分组倒计时等可能冲突的状态。
+     *
+     * 不重置定时停止计时（spec：地理触发开新段不应重置定时停止计时）。
+     *
+     * @param label 地点备注（未经清洗），内部会经 [RecordingFileManager.sanitizeLocationLabel] 清洗
+     */
+    fun forceSegmentByGeoTrigger(label: String) {
+        val cleanLabel = RecordingFileManager.sanitizeLocationLabel(label)
+        pendingGeoLabel = cleanLabel
+        cancelPendingSegmentJobsForGeo()
+
+        when (phase) {
+            Phase.Recording -> {
+                samplingJob?.cancel()
+                samplingJob = null
+                // 灵感模式：当前段按灵感逻辑保存（灵感文件夹 + 跳过 10s 限制），
+                // 然后退出灵感模式，新段为地理触发段（普通模式）
+                if (inspirationMode) {
+                    finalizeAndUploadCurrent()
+                    inspirationMode = false
+                    InspirationModeStore.update(false)
+                } else {
+                    finalizeAndUploadCurrent()
+                }
+                startNewSegment(reason = "地理触发")
+            }
+            Phase.PauseSelecting, Phase.PausedForever, Phase.PausedTimed -> {
+                // 暂停态：直接结束当前段 + 开新段带 label（spec 建议方案）
+                // 不走 stopSession 以避免触发 Idle → stopForeground
+                samplingJob?.cancel()
+                samplingJob = null
+                if (inspirationMode) {
+                    finalizeAndUploadCurrent()
+                    inspirationMode = false
+                    InspirationModeStore.update(false)
+                } else {
+                    finalizeAndUploadCurrent()
+                }
+                startNewSegment(reason = "地理触发")
+            }
+            Phase.Monitoring -> {
+                // 间隔期：停止监测，开新段带 label
+                audioMonitor?.stop()
+                audioMonitor = null
+                startNewSegment(reason = "地理触发")
+            }
+            Phase.Idle -> Unit // pendingGeoLabel 已设置，等待外部 startSession
+        }
+    }
+
+    /**
+     * 设置待消费的地理触发地点备注，供下一次 [startSession] 创建的第一个片段使用。
+     *
+     * 用于地理触发在 Idle 态启动新录音会话的场景：[RecordingService] 收到触发动作时
+     * 若 controller 未活跃，调用此方法设置 label 后再 [startRecording]，
+     * [startSession] → [startNewSegment] 会消费此 label 嵌入文件名。
+     */
+    fun setPendingGeoLabel(label: String) {
+        pendingGeoLabel = RecordingFileManager.sanitizeLocationLabel(label)
+    }
+
+    /**
+     * 取消所有可能挂起的分段/分组/暂停/反馈任务，避免与地理触发分段冲突。
+     * 用于 [forceSegmentByGeoTrigger] 开始前清理状态。
+     */
+    private fun cancelPendingSegmentJobsForGeo() {
+        segmentClickJob?.cancel()
+        segmentClickJob = null
+        kbSwitchJob?.cancel()
+        kbSwitchJob = null
+        segmentFeedbackJob?.cancel()
+        segmentFeedbackJob = null
+        pauseSelectJob?.cancel()
+        pauseSelectJob = null
+        pauseTimerJob?.cancel()
+        pauseTimerJob = null
+    }
+
     /** 结束整个会话：落盘当前片段并上传，释放所有资源。 */
     fun stopSession() {
         samplingJob?.cancel()
@@ -643,7 +742,11 @@ class SegmentController(
         // 取当前选中的文件夹 ID 嵌入文件名，作为后续列表过滤的归属标识。
         // 未选择文件夹时为空串，文件名退化为无 _f 后缀格式，归类为「未分类」（上传到知识库根目录）。
         val folderId = imaSettings.config.value.currentFolderId
-        val file = fileManager.createRecordingFile(folderId)
+        // 消费地理触发的地点备注：非空时文件名插入地点备注（地理触发格式），
+        // 空串时退化为原格式，保证非地理触发的录音文件名完全不变。
+        val geoLabel = pendingGeoLabel
+        pendingGeoLabel = ""
+        val file = fileManager.createRecordingFile(folderId, geoLabel)
         val recorder = createMediaRecorder().apply {
             setAudioSource(MediaRecorder.AudioSource.MIC)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)

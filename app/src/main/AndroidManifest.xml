@@ -4,11 +4,23 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- 地理触发录音：定位权限 -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <!-- 地理触发录音：读取照片解析 EXIF GPS（Android 13+） -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <!-- 地理触发录音：访问照片 EXIF GPS（Android 10+，对齐 focus_mode_app：MediaStore URI 默认会做位置脱敏，需此权限 + MediaStore.setRequireOriginal 才能拿到原图） -->
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
+    <!-- 地理触发录音：读取照片解析 EXIF GPS（Android 12 及以下） -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
     <application
         android:allowBackup="true"
@@ -31,6 +43,12 @@
             android:name=".RecordingService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- 地理触发录音：后台定时定位扫描前台服务 -->
+        <service
+            android:name=".LocationTriggerService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
 
         <!-- FileProvider：用于通过系统分享面板把录音文件以 content:// Uri 分享给其它 APP -->
         <provider

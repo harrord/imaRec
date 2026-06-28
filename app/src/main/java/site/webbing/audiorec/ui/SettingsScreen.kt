@@ -1,27 +1,45 @@
 package site.webbing.audiorec.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -30,6 +48,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -46,18 +65,31 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.google.android.gms.location.CurrentLocationRequest
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
+import site.webbing.audiorec.ExifGpsReader
 import site.webbing.audiorec.FolderOption
+import site.webbing.audiorec.GeoLocation
+import site.webbing.audiorec.GeoTriggerConfig
+import site.webbing.audiorec.GeoTriggerSettings
 import site.webbing.audiorec.ImaSettings
 import site.webbing.audiorec.ImaUploader
+import site.webbing.audiorec.LocationTriggerService
 import site.webbing.audiorec.RecordingFile
 import site.webbing.audiorec.RecordingFileManager
 import site.webbing.audiorec.segment.SegmentConfig
 import site.webbing.audiorec.segment.SegmentSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import java.util.UUID
+import kotlin.coroutines.resume
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -296,6 +328,29 @@ fun SettingsScreen(
                         it.copy(pauseMinutesX = x, pauseMinutesY = y, pauseMinutesZ = z)
                     }
                 },
+            )
+
+            // ── 地理触发录音 ──
+            // 后台定时检查设备位置，进入预设地点偏差范围时强制分段+开新录音，离开时可选自动停止。
+            // 独立于录音会话运行，即使未在录音也会后台扫描。总开关默认关闭。
+            val geoSettings = remember { GeoTriggerSettings.get(context) }
+            val geoConfig by geoSettings.config.collectAsStateWithLifecycle()
+            GeoTriggerSection(
+                config = geoConfig,
+                onToggle = { enabled ->
+                    if (enabled) {
+                        // 开启总开关时启动前台服务（权限在 Section 内部处理）
+                        LocationTriggerService.start(context)
+                    } else {
+                        LocationTriggerService.stop(context)
+                    }
+                    geoSettings.setEnabled(enabled)
+                },
+                onIntervalChange = { v -> geoSettings.update { it.copy(scanIntervalMinutes = v) } },
+                onRadiusChange = { v -> geoSettings.update { it.copy(radiusMeters = v) } },
+                onLeaveToStopChange = { v -> geoSettings.update { it.copy(leaveToStop = v) } },
+                onAddLocation = { loc -> geoSettings.addLocation(loc) },
+                onRemoveLocation = { id -> geoSettings.removeLocation(id) },
             )
         }
     }
@@ -993,4 +1048,418 @@ private fun DeleteFolderDialog(
             TextButton(onClick = onDismiss) { Text("取消") }
         },
     )
+}
+
+// ── 地理触发录音设置 ──
+
+/**
+ * 地理触发录音设置区域。
+ *
+ * 包含：总开关（默认关闭，开启时请求定位权限并启动前台服务）、扫描间隔、偏差范围、
+ * 离开停止开关、预设地点列表（可删除）、添加地点入口（弹窗支持照片 EXIF 与当前定位两种方式）。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GeoTriggerSection(
+    config: GeoTriggerConfig,
+    onToggle: (Boolean) -> Unit,
+    onIntervalChange: (Int) -> Unit,
+    onRadiusChange: (Int) -> Unit,
+    onLeaveToStopChange: (Boolean) -> Unit,
+    onAddLocation: (GeoLocation) -> Unit,
+    onRemoveLocation: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    var showAddDialog by rememberSaveable { mutableStateOf(false) }
+
+    Text(
+        text = "地理触发录音",
+        style = MaterialTheme.typography.titleMedium,
+    )
+    Text(
+        text = "后台定时检查位置，进入预设地点的偏差范围时强制分段并开新录音（文件名带地点备注）；离开范围可选自动停止。独立于录音会话运行，即使未在录音也会后台扫描。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
+    // 总开关：开启时需先请求定位权限（前台 + 后台），权限被拒时回退开关并 Toast
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { result ->
+        val hasFine = result[Manifest.permission.ACCESS_FINE_LOCATION] ?: hasLocationPermission(context)
+        if (!hasFine) {
+            Toast.makeText(context, "需要定位权限才能启用地理触发", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        // 前台定位已授予，Android 10+ 还需要后台定位权限
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val hasBg = result[Manifest.permission.ACCESS_BACKGROUND_LOCATION]
+            if (hasBg != true) {
+                Toast.makeText(
+                    context,
+                    "需要后台定位权限才能在后台扫描，请在系统设置中授予「始终允许」",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
+        onToggle(true)
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.padding(end = 16.dp)) {
+            Text(text = "启用地理触发", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = "进入预设地点时自动开新录音",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(
+            checked = config.enabled,
+            onCheckedChange = { enabled ->
+                if (enabled) {
+                    // 检查前台定位权限，缺失则请求；已具备则直接开启
+                    if (!hasLocationPermission(context)) {
+                        val perms = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            perms += Manifest.permission.ACCESS_BACKGROUND_LOCATION
+                        }
+                        permissionLauncher.launch(perms.toTypedArray())
+                    } else {
+                        onToggle(true)
+                    }
+                } else {
+                    onToggle(false)
+                }
+            },
+        )
+    }
+
+    if (!config.enabled) return
+
+    IntField(
+        label = "扫描间隔（分钟，1–60）",
+        value = config.scanIntervalMinutes,
+        onChange = { v -> onIntervalChange(v.coerceIn(1, 60)) },
+    )
+    IntField(
+        label = "偏差范围（米，50–2000）",
+        value = config.radiusMeters,
+        onChange = { v -> onRadiusChange(v.coerceIn(50, 2000)) },
+    )
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.padding(end = 16.dp)) {
+            Text(text = "离开范围自动停止", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = "离开预设地点偏差范围时停止录音",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(checked = config.leaveToStop, onCheckedChange = onLeaveToStopChange)
+    }
+
+    // 预设地点列表
+    Text(
+        text = "预设地点（${config.locations.size}）",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 8.dp),
+    )
+    if (config.locations.isEmpty()) {
+        Text(
+            text = "尚未添加地点，点击下方按钮添加",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    } else {
+        config.locations.forEach { loc ->
+            GeoLocationRow(location = loc, onDelete = { onRemoveLocation(loc.id) })
+        }
+    }
+
+    OutlinedButton(
+        onClick = { showAddDialog = true },
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+    ) {
+        Icon(Icons.Default.Add, contentDescription = null)
+        Spacer(Modifier.width(8.dp))
+        Text("添加地点")
+    }
+
+    if (showAddDialog) {
+        AddLocationDialog(
+            onConfirm = { loc ->
+                onAddLocation(loc)
+                showAddDialog = false
+            },
+            onDismiss = { showAddDialog = false },
+        )
+    }
+}
+
+@Composable
+private fun GeoLocationRow(
+    location: GeoLocation,
+    onDelete: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Default.LocationOn,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+        )
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 8.dp),
+        ) {
+            Text(
+                text = location.label,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = String.format(
+                    Locale.getDefault(),
+                    "%.6f, %.6f · %s",
+                    location.latitude,
+                    location.longitude,
+                    location.source,
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        IconButton(onClick = onDelete) {
+            Icon(
+                imageVector = Icons.Default.Delete,
+                contentDescription = "删除地点",
+                tint = MaterialTheme.colorScheme.error,
+            )
+        }
+    }
+}
+
+/**
+ * 添加地点弹窗：支持两种方式获取坐标。
+ *
+ * - 「从相册选照片」：调起系统图片选择器，解析 EXIF GPS；无 GPS 时 Toast 拒绝
+ * - 「使用当前定位」：调起 FusedLocationProvider 获取当前位置
+ * 解析成功后回显坐标，用户填写备注后确认保存。备注必填且清洗后不得为空。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AddLocationDialog(
+    onConfirm: (GeoLocation) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    var label by rememberSaveable { mutableStateOf("") }
+    var latLng by remember { mutableStateOf<DoubleArray?>(null) }
+    var source by rememberSaveable { mutableStateOf("") }
+    var loading by rememberSaveable { mutableStateOf(false) }
+    var errorMessage by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // 照片选择器：通过 SAF 文件选择器（ACTION_OPEN_DOCUMENT）选取图片
+    // 使用 OpenDocument + image/* 而非 Photo Picker：
+    // 国产 ROM 的 Photo Picker 会剥离 EXIF GPS 信息，而 SAF 文件选择器保留完整 EXIF
+    // 写法对齐 focus_mode_app 复活点设置
+    val photoPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            loading = true
+            errorMessage = null
+            val gps = withContext(Dispatchers.IO) {
+                ExifGpsReader.readGps(context, uri)
+            }
+            loading = false
+            if (gps == null) {
+                errorMessage = null
+                Toast.makeText(context, "该照片无 GPS 信息，请重新选择", Toast.LENGTH_SHORT).show()
+            } else {
+                latLng = gps
+                source = "photo"
+            }
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "添加地点",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            OutlinedTextField(
+                value = label,
+                onValueChange = { label = it },
+                label = { Text("备注（必填，如 XX公园）") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = {
+                        // 通过 SAF 文件选择器选取图片，保留 EXIF GPS 信息
+                        photoPicker.launch(arrayOf("image/*"))
+                    },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("从文件管理器选择")
+                }
+                OutlinedButton(
+                    onClick = {
+                        if (!hasLocationPermission(context)) {
+                            Toast.makeText(context, "需要定位权限才能获取当前位置", Toast.LENGTH_SHORT).show()
+                            return@OutlinedButton
+                        }
+                        scope.launch {
+                            loading = true
+                            errorMessage = null
+                            val loc = getCurrentLocationOnce(context)
+                            loading = false
+                            if (loc == null) {
+                                errorMessage = "获取当前位置失败"
+                            } else {
+                                latLng = doubleArrayOf(loc.latitude, loc.longitude)
+                                source = "current"
+                            }
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("使用当前定位")
+                }
+            }
+
+            if (loading) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp))
+                    Text("正在获取位置…", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+
+            errorMessage?.let {
+                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+
+            // 坐标回显
+            latLng?.let { coords ->
+                Text(
+                    text = String.format(
+                        Locale.getDefault(),
+                        "坐标：%.6f, %.6f",
+                        coords[0],
+                        coords[1],
+                    ),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+
+            HorizontalDivider()
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(onClick = onDismiss) { Text("取消") }
+                Spacer(Modifier.width(8.dp))
+                val cleanLabel = RecordingFileManager.sanitizeLocationLabel(label)
+                val canConfirm = cleanLabel.isNotEmpty() && latLng != null
+                TextButton(
+                    onClick = {
+                        val coords = latLng ?: return@TextButton
+                        val finalLabel = RecordingFileManager.sanitizeLocationLabel(label)
+                        if (finalLabel.isEmpty()) {
+                            Toast.makeText(context, "备注清洗后为空，请重新填写", Toast.LENGTH_SHORT).show()
+                            return@TextButton
+                        }
+                        onConfirm(
+                            GeoLocation(
+                                id = UUID.randomUUID().toString(),
+                                label = finalLabel,
+                                latitude = coords[0],
+                                longitude = coords[1],
+                                source = source,
+                            ),
+                        )
+                    },
+                    enabled = canConfirm,
+                ) { Text("保存") }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+/** 检查是否已授予精细定位权限。 */
+private fun hasLocationPermission(context: android.content.Context): Boolean =
+    ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.ACCESS_FINE_LOCATION,
+    ) == PackageManager.PERMISSION_GRANTED
+
+/**
+ * 用 FusedLocationProvider 获取一次当前位置（挂起函数）。
+ * 失败或取消时返回 null。
+ */
+private suspend fun getCurrentLocationOnce(
+    context: android.content.Context,
+): android.location.Location? {
+    val fusedClient = LocationServices.getFusedLocationProviderClient(context)
+    return suspendCancellableCoroutine { cont ->
+        val cts = CancellationTokenSource()
+        cont.invokeOnCancellation { cts.cancel() }
+        val request = CurrentLocationRequest.Builder()
+            .setPriority(Priority.PRIORITY_BALANCED_POWER_ACCURACY)
+            .setMaxUpdateAgeMillis(60_000L)
+            .build()
+        fusedClient.getCurrentLocation(request, cts.token)
+            .addOnSuccessListener { loc -> if (cont.isActive) cont.resume(loc) }
+            .addOnFailureListener { e ->
+                android.util.Log.e("AddLocationDialog", "getCurrentLocation failed", e)
+                if (cont.isActive) cont.resume(null)
+            }
+    }
 }

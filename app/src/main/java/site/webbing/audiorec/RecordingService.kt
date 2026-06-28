@@ -130,6 +130,20 @@ class RecordingService : Service() {
                 performHapticFeedback()
                 controller.switchFolder()
             }
+            ACTION_GEO_TRIGGER_SEGMENT -> {
+                val label = intent.getStringExtra(EXTRA_GEO_LABEL) ?: ""
+                if (controller.isActive) {
+                    // 任何活跃状态（Recording/Paused/Monitoring）都强制分段+开新段带 label
+                    controller.forceSegmentByGeoTrigger(label)
+                } else {
+                    // Idle 态：设置 label 后启动新录音会话，文件名带 label
+                    controller.setPendingGeoLabel(label)
+                    startRecording()
+                }
+            }
+            ACTION_GEO_TRIGGER_STOP -> {
+                if (controller.isActive) stopRecording()
+            }
         }
         return START_NOT_STICKY
     }
@@ -343,6 +357,12 @@ class RecordingService : Service() {
         const val ACTION_TOGGLE_PAUSE = "site.webbing.audiorec.action.TOGGLE_PAUSE"
         const val ACTION_MANUAL_SEGMENT = "site.webbing.audiorec.action.MANUAL_SEGMENT"
         const val ACTION_SWITCH_KB = "site.webbing.audiorec.action.SWITCH_KB"
+        /** 地理触发：强制分段并开新录音（文件名带地点备注）。 */
+        const val ACTION_GEO_TRIGGER_SEGMENT = "site.webbing.audiorec.action.GEO_TRIGGER_SEGMENT"
+        /** 地理触发：离开范围时停止录音。 */
+        const val ACTION_GEO_TRIGGER_STOP = "site.webbing.audiorec.action.GEO_TRIGGER_STOP"
+        /** Intent extra：地点备注，随 [ACTION_GEO_TRIGGER_SEGMENT] 传递。 */
+        const val EXTRA_GEO_LABEL = "geo_label"
 
         // 锁屏控件周期性刷新间隔：10 分钟。
         // 取 10 分钟（而非历史上放弃的 200ms 声波动画），用户点击撞上重建的概率极低，
@@ -366,6 +386,36 @@ class RecordingService : Service() {
         fun togglePause(context: Context) {
             val intent = Intent(context, RecordingService::class.java).apply {
                 action = ACTION_TOGGLE_PAUSE
+            }
+            context.startService(intent)
+        }
+
+        /**
+         * 地理触发：强制对当前录音会话分段并开新录音，新段文件名带 [label]。
+         *
+         * 由 [LocationTriggerService] 在设备进入预设地点偏差范围内时调用。
+         * 若当前未在录音（Idle），会启动新的录音会话，文件名带 [label]。
+         * 若正在录音（任何活跃状态），强制分段+开新段。
+         *
+         * 使用 startForegroundService 以保证 RecordingService 在后台被唤起时能升为前台。
+         */
+        fun triggerGeoSegment(context: Context, label: String) {
+            val intent = Intent(context, RecordingService::class.java).apply {
+                action = ACTION_GEO_TRIGGER_SEGMENT
+                putExtra(EXTRA_GEO_LABEL, label)
+            }
+            ContextCompat.startForegroundService(context, intent)
+        }
+
+        /**
+         * 地理触发：离开范围时停止录音。
+         *
+         * 由 [LocationTriggerService] 在设备离开预设地点偏差范围且
+         * [GeoTriggerConfig.leaveToStop] 开启时调用。若当前未在录音则忽略。
+         */
+        fun triggerGeoStop(context: Context) {
+            val intent = Intent(context, RecordingService::class.java).apply {
+                action = ACTION_GEO_TRIGGER_STOP
             }
             context.startService(intent)
         }

@@ -88,6 +88,7 @@ import androidx.compose.ui.unit.dp
 import android.util.Log
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import site.webbing.audiorec.FolderOption
+import site.webbing.audiorec.GeoTriggerRuntimeState
 import site.webbing.audiorec.ImaUploadStatus
 import site.webbing.audiorec.PlaybackStatus
 import site.webbing.audiorec.RecordingFile
@@ -298,6 +299,7 @@ fun MainScreen(
             RecordButtonBar(
                 status = uiState.recordingStatus,
                 segmentInfo = uiState.segmentInfo,
+                geoTrigger = uiState.geoTrigger,
                 onClick = onRecordButtonClick,
             )
         },
@@ -542,6 +544,7 @@ private fun RecordingRow(
 private fun RecordButtonBar(
     status: RecordingStatus,
     segmentInfo: SegmentInfo?,
+    geoTrigger: GeoTriggerRuntimeState,
     onClick: () -> Unit,
 ) {
     val isActive = status is RecordingStatus.Recording || status is RecordingStatus.Monitoring
@@ -584,6 +587,23 @@ private fun RecordButtonBar(
             .padding(horizontal = 24.dp, vertical = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        // 地理触发状态行：已触发录音中时显示「地理触发录音中 · XX」；
+        // 未触发但距最近地点较近时显示「距 XX Nm」（距离信息可选展示）
+        val geoText: String? = when {
+            geoTrigger.triggeredLabel != null -> "地理触发录音中 · ${geoTrigger.triggeredLabel}"
+            geoTrigger.nearestLabel != null && geoTrigger.nearestDistanceMeters != null -> {
+                "距 ${geoTrigger.nearestLabel} ${geoTrigger.nearestDistanceMeters}m"
+            }
+            else -> null
+        }
+        if (geoText != null) {
+            Text(
+                text = geoText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(bottom = 4.dp),
+            )
+        }
         val statusText: String? = when (status) {
             is RecordingStatus.Paused -> "录音已暂停，可在通知中继续"
             is RecordingStatus.Monitoring -> {

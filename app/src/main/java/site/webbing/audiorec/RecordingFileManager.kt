@@ -30,17 +30,25 @@ class RecordingFileManager(private val context: Context) {
     /**
      * 创建一个新的录音文件。
      *
-     * 文件名格式：`REC_yyyyMMdd_HHmmss_f<folderId>.m4a`
-     * 当 [folderId] 为空时（用户未选择文件夹，上传到知识库根目录），
-     * 退化为 `REC_yyyyMMdd_HHmmss.m4a`。
+     * 文件名格式：
+     * - 普通录音：`REC_yyyyMMdd_HHmmss.m4a` 或 `REC_yyyyMMdd_HHmmss_f<folderId>.m4a`
+     * - 地理触发录音（[locationLabel] 非空）：`REC_yyyyMMdd_HHmmss_<label>.m4a`
+     *   或 `REC_yyyyMMdd_HHmmss_<label>_f<folderId>.m4a`
+     *
+     * 地点备注 [locationLabel] 会先经 [sanitizeLocationLabel] 清洗，
+     * 清洗后为空则忽略（退化为无 label 格式），保证文件名格式不会破坏 folderId 解析。
+     *
+     * 当 [folderId] 为空时（用户未选择文件夹，上传到知识库根目录），省略 `_f` 后缀。
      */
-    fun createRecordingFile(folderId: String = ""): File {
+    fun createRecordingFile(folderId: String = "", locationLabel: String = ""): File {
         val directory = recordingsDirectory()
         if (!directory.exists()) {
             directory.mkdirs()
         }
         val base = "REC_${fileNameFormat.format(Date())}"
-        val name = if (folderId.isBlank()) "$base.m4a" else "${base}_f$folderId.m4a"
+        val cleanLabel = sanitizeLocationLabel(locationLabel)
+        val withLabel = if (cleanLabel.isEmpty()) base else "${base}_$cleanLabel"
+        val name = if (folderId.isBlank()) "$withLabel.m4a" else "${withLabel}_f$folderId.m4a"
         return File(directory, name)
     }
 
@@ -144,6 +152,10 @@ class RecordingFileManager(private val context: Context) {
      * 从文件名中解析归属的文件夹 ID。
      * 文件名形如 `REC_20260626_120000_f12345.m4a`，返回 `12345`；
      * 旧格式 `REC_20260626_120000.m4a` 返回空字符串（上传到知识库根目录）。
+     *
+     * 地理触发格式 `REC_20260626_120000_XX公园_f12345.m4a` 同样返回 `12345`：
+     * [lastIndexOf] 跳过 label 部分定位到最后的 `_f` 分隔符，因为 label 经
+     * [sanitizeLocationLabel] 清洗后保证不含 `_f` 子串。
      */
     private fun parseFolderIdFromName(name: String): String {
         if (!name.endsWith(".m4a", ignoreCase = true)) return ""
@@ -156,5 +168,38 @@ class RecordingFileManager(private val context: Context) {
     private fun recordingsDirectory(): File {
         val musicDirectory = context.getExternalFilesDir(Environment.DIRECTORY_MUSIC) ?: context.filesDir
         return File(musicDirectory, RECORDING_DIRECTORY)
+    }
+
+    companion object {
+        /**
+         * 清洗地理触发录音的地点备注，确保可安全嵌入文件名且不破坏 folderId 解析。
+         *
+         * 规则：
+         * - 不得包含 `_f` 子串（避免被 [parseFolderIdFromName] 误判为文件夹分隔符）
+         * - 不得包含 `.m4a`、`/`、`\`、换行符
+         * - 仅允许中文、字母、数字、连字符（-）；其他字符统一替换为 `_`
+         * - 清洗后去除首尾下划线
+         *
+         * @return 清洗后的备注；若清洗后为空则返回空串，调用方应拒绝添加该地点
+         */
+        fun sanitizeLocationLabel(label: String): String {
+            if (label.isBlank()) return ""
+            val sanitized = buildString {
+                label.forEach { ch ->
+                    when {
+                        ch in 'a'..'z' || ch in 'A'..'Z' || ch in '0'..'9' || ch == '-' -> append(ch)
+                        // 中日韩等 CJK 字符范围（包含中文）：保留
+                        ch.code in 0x4E00..0x9FFF ||
+                            ch.code in 0x3400..0x4DBF ||
+                            ch.code in 0x3000..0x303F ||
+                            ch.code in 0xFF00..0xFFEF -> append(ch)
+                        else -> append('_')
+                    }
+                }
+            }
+            // 移除可能出现的 `_f` 子串（替换为 `__`），防止文件夹 ID 解析误判
+            val noFolderSep = sanitized.replace("_f", "__")
+            return noFolderSep.trim('_')
+        }
     }
 }
