@@ -21,6 +21,8 @@ import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import site.webbing.audiorec.CalendarCapsuleSettings
+import site.webbing.audiorec.CalendarScanService
 import site.webbing.audiorec.segment.SegmentSettings
 import site.webbing.audiorec.ui.MainScreen
 import site.webbing.audiorec.ui.SettingsScreen
@@ -83,6 +85,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         NotificationHelper(this).createChannel()
+
+        // 闪念胶囊：APP 启动时检查开关已开则拉起服务（处理手机重启场景）
+        if (CalendarCapsuleSettings.get(this).config.value.enabled) {
+            CalendarScanService.start(this)
+        }
 
         setContent {
             ImaRecTheme {

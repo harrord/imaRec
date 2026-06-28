@@ -79,6 +79,9 @@ import com.google.android.gms.location.CurrentLocationRequest
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
+import site.webbing.audiorec.CalendarCapsuleConfig
+import site.webbing.audiorec.CalendarCapsuleSettings
+import site.webbing.audiorec.CalendarScanService
 import site.webbing.audiorec.ExifGpsReader
 import site.webbing.audiorec.FolderOption
 import site.webbing.audiorec.GeoLocation
@@ -114,6 +117,8 @@ fun SettingsScreen(
     val fileManager = remember { RecordingFileManager(context) }
     val geoSettings = remember { GeoTriggerSettings.get(context) }
     val geoConfig by geoSettings.config.collectAsStateWithLifecycle()
+    val capsuleSettings = remember { CalendarCapsuleSettings.get(context) }
+    val capsuleConfig by capsuleSettings.config.collectAsStateWithLifecycle()
 
     // 删除文件夹确认弹窗的状态：待删除的文件夹 + 该文件夹下将被删除的录音列表 + 加载标记
     var pendingDeleteFolder by remember { mutableStateOf<FolderOption?>(null) }
@@ -358,6 +363,39 @@ fun SettingsScreen(
                     onLeaveToStopChange = { v -> geoSettings.update { it.copy(leaveToStop = v) } },
                     onAddLocation = { loc -> geoSettings.addLocation(loc) },
                     onRemoveLocation = { id -> geoSettings.removeLocation(id) },
+                )
+            }
+
+            // ── 卡片 9：闪念胶囊 ──
+            SettingsCard(
+                title = "闪念胶囊",
+                description = "从系统日历读取 AI 助手新建的日程，提取文字作为笔记上传到 IMA 指定文件夹。" +
+                    "开启后后台定时扫描，锁屏也能运行。",
+            ) {
+                CalendarCapsuleSection(
+                    config = capsuleConfig,
+                    knowledgeBaseId = config.knowledgeBaseId,
+                    onToggle = { enabled ->
+                        if (enabled) {
+                            CalendarScanService.start(context)
+                        } else {
+                            CalendarScanService.stop(context)
+                        }
+                        capsuleSettings.setEnabled(enabled)
+                    },
+                    onFolderSelected = { id, name ->
+                        capsuleSettings.setTargetFolder(id, name)
+                        // 配置变更时即时刷新通知
+                        if (capsuleConfig.enabled) CalendarScanService.refresh(context)
+                    },
+                    onAnchorHourChange = { hour ->
+                        capsuleSettings.setAnchorHour(hour)
+                        if (capsuleConfig.enabled) CalendarScanService.refresh(context)
+                    },
+                    onIntervalChange = { minutes ->
+                        capsuleSettings.setScanInterval(minutes)
+                        if (capsuleConfig.enabled) CalendarScanService.refresh(context)
+                    },
                 )
             }
         }
@@ -1660,4 +1698,108 @@ private suspend fun getCurrentLocationOnce(
                 if (cont.isActive) cont.resume(null)
             }
     }
+}
+
+// ── 闪念胶囊设置 ──
+
+/**
+ * 闪念胶囊卡片内容区域。
+ *
+ * 总开关（开启时申请 READ_CALENDAR 权限并启动 [CalendarScanService]）、
+ * 指定文件夹（依赖知识库已选择）、日历时间锚点（0-23 小时）、扫描间隔（1-5 分钟）。
+ */
+@Composable
+private fun CalendarCapsuleSection(
+    config: CalendarCapsuleConfig,
+    knowledgeBaseId: String,
+    onToggle: (Boolean) -> Unit,
+    onFolderSelected: (id: String, name: String) -> Unit,
+    onAnchorHourChange: (Int) -> Unit,
+    onIntervalChange: (Int) -> Unit,
+) {
+    val context = LocalContext.current
+
+    // 总开关：开启时需先请求 READ_CALENDAR 权限，未授权不允许开启
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { result ->
+        val granted = result[Manifest.permission.READ_CALENDAR]
+            ?: (ContextCompat.checkSelfPermission(
+                context, Manifest.permission.READ_CALENDAR,
+            ) == PackageManager.PERMISSION_GRANTED)
+        if (!granted) {
+            Toast.makeText(context, "需要日历读取权限才能启用闪念胶囊", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        onToggle(true)
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.padding(end = 16.dp)) {
+            Text(text = "启用闪念胶囊", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = "扫描系统日历，匹配日程时自动建笔记上传",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(
+            checked = config.enabled,
+            onCheckedChange = { enabled ->
+                if (enabled) {
+                    if (ContextCompat.checkSelfPermission(
+                            context, Manifest.permission.READ_CALENDAR,
+                        ) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        permissionLauncher.launch(arrayOf(Manifest.permission.READ_CALENDAR))
+                    } else {
+                        onToggle(true)
+                    }
+                } else {
+                    onToggle(false)
+                }
+            },
+        )
+    }
+
+    if (!config.enabled) return
+
+    // 指定文件夹（依赖知识库已选择）
+    FolderPicker(
+        selectedId = config.targetFolderId,
+        selectedName = config.targetFolderName,
+        knowledgeBaseId = knowledgeBaseId,
+        buttonText = "点击选择笔记上传目标文件夹",
+        onSelected = onFolderSelected,
+    )
+
+    // 日历时间锚点说明
+    Text(
+        text = "日历时间锚点：这是一个固定的小时数（0-23），APP 只处理开始时间落在这个小时内的日程。" +
+            "例如设为 ${config.anchorHour}，则只处理 ${config.anchorHour}:00-${config.anchorHour}:59 开始的日程。" +
+            "用途：从最近创建的日程里筛出你想建笔记的那一条。按手机本地时区匹配。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    IntField(
+        label = "锚点小时（0-23）",
+        value = config.anchorHour,
+        onChange = { v -> onAnchorHourChange(v.coerceIn(0, 23)) },
+    )
+
+    // 扫描间隔
+    IntField(
+        label = "扫描间隔（分钟，1-5）",
+        value = config.scanIntervalMinutes,
+        onChange = { v -> onIntervalChange(v.coerceIn(1, 5)) },
+    )
+    Text(
+        text = "扫描间隔必须 ≤ 5 分钟，否则可能漏扫新创建的日程。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }

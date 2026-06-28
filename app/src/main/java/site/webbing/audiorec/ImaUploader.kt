@@ -261,6 +261,88 @@ class ImaUploader private constructor(
         result
     }
 
+    /**
+     * 创建纯文字笔记并关联到知识库文件夹（两步流程）。
+     *
+     * 用于闪念胶囊功能：把日历日程文字作为笔记上传到 IMA。
+     *
+     * **Step 1**：`POST /openapi/note/v1/import_doc` 创建纯文字笔记
+     * - 请求体：`{ "content_format": 1, "content": "# 标题\n\n正文" }`
+     * - **不传 folder_id**（此接口的 folder_id 是「笔记本 ID」，不是知识库文件夹 ID，两者不同体系）
+     * - 返回 `note_id`
+     *
+     * **Step 2**：`POST /openapi/wiki/v1/add_knowledge` 把笔记关联进知识库文件夹
+     * - 请求体：`{ "media_type": 11, "note_info": { "content_id": "note_id" },
+     *   "title": "标题", "knowledge_base_id": "kb_id", "folder_id": "folder_id" }`
+     *
+     * 鉴权头（两步通用）：`ima-openapi-clientid` + `ima-openapi-apikey` + `Content-Type: application/json`。
+     *
+     * @param title 笔记标题（用于 add_knowledge 的 title 字段）
+     * @param content Markdown 正文（已包含 # 标题行，作为 import_doc 的 content）
+     * @param folderId 知识库文件夹 ID（空串=根目录）
+     * @return true=成功，false=失败（失败不标记 processed，调用方下次重试）
+     */
+    suspend fun createTextNote(title: String, content: String, folderId: String): Boolean =
+        withContext(Dispatchers.IO) {
+            val config = settings.config.value
+            if (!config.isConfigured) {
+                logE("createTextNote: IMA not configured " +
+                    "(clientId=${config.clientId.isNotBlank()} apiKey=${config.apiKey.isNotBlank()} " +
+                    "kbId=${config.knowledgeBaseId.isNotBlank()})")
+                return@withContext false
+            }
+            logD(
+                "createTextNote: start\n" +
+                    "  title=\"$title\" (len=${title.length})\n" +
+                    "  contentLen=${content.length}\n" +
+                    "  knowledgeBaseId=\"${config.knowledgeBaseId}\" (len=${config.knowledgeBaseId.length})\n" +
+                    "  folderId=\"$folderId\" (len=${folderId.length})"
+            )
+
+            // Step 1: import_doc 创建纯文字笔记（不传 folder_id）
+            val step1Body = JSONObject().apply {
+                put("content_format", 1) // MARKDOWN
+                put("content", content)
+                // 不传 folder_id：此接口的 folder_id 是笔记本 ID，不是知识库文件夹 ID
+            }
+            logD("→ Step 1: POST openapi/note/v1/import_doc\n  body=$step1Body")
+            val step1Data = try {
+                postJson("openapi/note/v1/import_doc", step1Body, config)
+            } catch (e: Exception) {
+                logE("createTextNote Step 1 (import_doc) failed: ${e.message}")
+                return@withContext false
+            }
+            val noteId = step1Data.optString("note_id")
+            if (noteId.isBlank()) {
+                logE("createTextNote Step 1: no note_id in response, data=$step1Data")
+                return@withContext false
+            }
+            logD("Step 1 done: noteId=$noteId")
+
+            // Step 2: add_knowledge 把笔记关联进知识库文件夹（media_type=11 笔记）
+            val step2Body = JSONObject().apply {
+                put("media_type", 11) // 笔记
+                put("note_info", JSONObject().apply {
+                    put("content_id", noteId)
+                })
+                put("title", title)
+                put("knowledge_base_id", config.knowledgeBaseId)
+                // folder_id 省略=根目录；非空=指定文件夹
+                if (folderId.isNotBlank()) {
+                    put("folder_id", folderId)
+                }
+            }
+            logD("→ Step 2: POST openapi/wiki/v1/add_knowledge\n  body=$step2Body")
+            try {
+                postJson("openapi/wiki/v1/add_knowledge", step2Body, config)
+            } catch (e: Exception) {
+                logE("createTextNote Step 2 (add_knowledge) failed: ${e.message}")
+                return@withContext false
+            }
+            logD("createTextNote done: noteId=$noteId title=\"$title\" folderId=\"$folderId\"")
+            true
+        }
+
     private fun uploadInternal(file: File, config: ImaConfig) {
         ImaUploadStateStore.get(context).set(ImaUploadStatus.Uploading(file.name))
 

@@ -11,6 +11,11 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- 闪念胶囊：读取系统日历 -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <!-- 闪念胶囊：dataSync 类型前台服务（Android 14+ 需显式声明） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
     <!-- 地理触发录音：定位权限 -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
@@ -49,6 +54,12 @@
             android:name=".LocationTriggerService"
             android:exported="false"
             android:foregroundServiceType="location" />
+
+        <!-- 闪念胶囊：后台定时扫描系统日历前台服务 -->
+        <service
+            android:name=".CalendarScanService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- FileProvider：用于通过系统分享面板把录音文件以 content:// Uri 分享给其它 APP -->
         <provider
