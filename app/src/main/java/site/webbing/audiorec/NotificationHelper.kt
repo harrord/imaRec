@@ -264,6 +264,8 @@ class NotificationHelper(private val context: Context) {
             // - Paused(remainingMinutes=null)：人生记录已暂停
             // - Paused(remainingMinutes=N)：暂停剩余 N 分钟（每分钟递减）
             val toggleText = if (isPaused) "继续" else "暂停"
+            // 灵感模式下禁用暂停：按钮置灰显示且不响应点击（isPaused 态优先级更高，保持继续按钮可用）
+            val pauseDisabledByInspiration = inspirationActive && !isPaused
             val defaultHint = when {
                 !isPaused -> "人生记录中..."
                 status is RecordingStatus.Paused && status.remainingMinutes != null ->
@@ -275,10 +277,15 @@ class NotificationHelper(private val context: Context) {
             // 暂停态：继续按钮用琥珀色，分段 + 分组按钮置灰禁用
             // 录音态：暂停按钮用绿色，分段 + 分组按钮可用绿色
             // 灵感模式下分段按钮用帧动画（呼吸效果），非灵感态用静态绿色
+            // 灵感模式下暂停按钮置灰（btn_toggle_disabled），向用户明确该操作当前不可用
             setInt(
                 R.id.toggle_button,
                 "setBackgroundResource",
-                if (isPaused) R.drawable.btn_toggle_paused else R.drawable.btn_toggle_recording,
+                when {
+                    isPaused -> R.drawable.btn_toggle_paused
+                    pauseDisabledByInspiration -> R.drawable.btn_toggle_disabled
+                    else -> R.drawable.btn_toggle_recording
+                },
             )
             setInt(
                 R.id.segment_button,
@@ -306,7 +313,12 @@ class NotificationHelper(private val context: Context) {
                     setOnClickPendingIntent(R.id.group_button, null)
                 }
             }
-            setOnClickPendingIntent(R.id.toggle_button, togglePendingIntent())
+            // 灵感模式下禁用暂停按钮点击；暂停态保持继续按钮可点击
+            if (pauseDisabledByInspiration) {
+                setOnClickPendingIntent(R.id.toggle_button, null)
+            } else {
+                setOnClickPendingIntent(R.id.toggle_button, togglePendingIntent())
+            }
             // 提示行始终可见：有反馈时显示反馈文案，无反馈时显示默认文案（录音中/已暂停/暂停剩余 N 分钟）。
             // 固定高度保证卡片高度恒定，避免触发锁屏卡片展开/收缩。
             // 文字颜色根据系统深色/浅色模式动态设置：深色背景用浅色文字，浅色背景用深色文字，

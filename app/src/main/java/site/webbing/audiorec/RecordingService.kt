@@ -2,8 +2,10 @@ package site.webbing.audiorec
 
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -54,6 +56,15 @@ class RecordingService : Service() {
     // 锁屏控件周期性刷新协程（每 10 分钟 notify 一次，重新参与系统通知排序）。
     // 仅在 Recording / Paused / Monitoring 态运行；回到 Idle 时由 stopForegroundSafely 取消。
     private var lockscreenRefreshJob: Job? = null
+
+    /**
+     * 屏幕熄屏广播接收器：仅在录音会话活跃期间注册。
+     *
+     * 收到 [Intent.ACTION_SCREEN_OFF] 时调用 [SegmentController.stopInspirationByScreenOff]，
+     * 由 Controller 内部判断是否处于灵感模式：是则保存灵感并切回普通录音，否则忽略。
+     * 仅在录音会话活跃期间注册，避免全局监听带来的不必要开销；会话结束（Idle）时立即注销。
+     */
+    private var screenOffReceiver: BroadcastReceiver? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -129,6 +140,7 @@ class RecordingService : Service() {
         // 兜底：确保会话资源释放
         if (controller.isActive) controller.stopSession()
         stopLockscreenRefresh()
+        unregisterScreenOffReceiver()
         scope.cancel()
         releaseMediaSession()
         RecordingStateStore.update(RecordingStatus.Idle)
@@ -146,6 +158,8 @@ class RecordingService : Service() {
         )
         controller.startSession()
         startLockscreenRefresh()
+        // 注册屏幕熄屏监听：用户按电源键熄屏时，若处于灵感模式则自动保存灵感
+        registerScreenOffReceiver()
     }
 
     private fun stopRecording() {
@@ -166,6 +180,7 @@ class RecordingService : Service() {
 
     private fun stopForegroundSafely() {
         stopLockscreenRefresh()
+        unregisterScreenOffReceiver()
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -214,6 +229,50 @@ class RecordingService : Service() {
     private fun stopLockscreenRefresh() {
         lockscreenRefreshJob?.cancel()
         lockscreenRefreshJob = null
+    }
+
+    // ── 屏幕熄屏监听（灵感模式自动保存） ──
+
+    /**
+     * 注册 [Intent.ACTION_SCREEN_OFF] 广播接收器。幂等：已注册时直接返回，
+     * 避免 startRecording() 重复调用时重复注册。
+     *
+     * 收到熄屏广播后调用 [SegmentController.stopInspirationByScreenOff]，
+     * Controller 内部判断若处于灵感模式则保存灵感并切回普通录音，否则忽略。
+     */
+    private fun registerScreenOffReceiver() {
+        if (screenOffReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                    controller.stopInspirationByScreenOff()
+                }
+            }
+        }
+        // ACTION_SCREEN_OFF 为系统广播，仅系统可发送；使用 RECEIVER_NOT_EXPORTED 表明
+        // 不接收其他 APP 的广播，同时满足 targetSdk 34+ 对动态注册的 flag 要求。
+        ContextCompat.registerReceiver(
+            this,
+            receiver,
+            IntentFilter(Intent.ACTION_SCREEN_OFF),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        screenOffReceiver = receiver
+    }
+
+    /**
+     * 注销屏幕熄屏广播接收器。幂等：未注册时直接返回，注销后置空，
+     * 避免 stopForegroundSafely() 与 onDestroy() 重复注销抛 IllegalArgumentException。
+     */
+    private fun unregisterScreenOffReceiver() {
+        screenOffReceiver?.let {
+            try {
+                unregisterReceiver(it)
+            } catch (e: IllegalArgumentException) {
+                // 防御性：极端情况下重复注销不崩溃
+            }
+        }
+        screenOffReceiver = null
     }
 
     // ── MediaSession ──

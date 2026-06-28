@@ -129,9 +129,11 @@ class SegmentController(
      * 是否处于灵感记录模式。
      *
      * 双击分段按钮进入：开新段继续录音，反馈行持续显示
-     * "灵感开始记录，再次点击将存入 xx"，期间产生的录音（手动保存或自动分段）
+     * "灵感开始记录，锁屏/再次点击将存入 xx"，期间产生的录音（手动保存或自动分段）
      * 一律归到灵感目标文件夹 [ImaConfig.inspirationFolderId]，且不受 10 秒上传限制。
-     * 再次点击分段按钮（单击/双击均识别为单击）保存灵感录音并回到普通模式。
+     * 保存灵感有两种方式：再次点击分段按钮（单击/双击均识别为单击），或按下电源键熄屏
+     * （由 [stopInspirationByScreenOff] 触发）。保存后回到普通模式。
+     * 灵感模式期间禁用暂停（[togglePause] guard）。
      */
     private var inspirationMode = false
 
@@ -191,6 +193,11 @@ class SegmentController(
      * Monitoring / Idle 态忽略。
      */
     fun togglePause() {
+        // 灵感模式下禁用暂停：避免「灵感模式 + 暂停」组合态带来的状态冲突
+        // （暂停态下按电源键会破坏暂停语义、对 paused recorder 调 stop() 并开新段）。
+        // 所有暂停入口（通知暂停键、MediaSession.onPause、蓝牙耳机按键、锁屏媒体控件）
+        // 均走 togglePause()，一处 guard 即可全部堵住。
+        if (inspirationMode) return
         val recorder = mediaRecorder ?: return
         val file = currentFile ?: return
         when (phase) {
@@ -327,7 +334,7 @@ class SegmentController(
             startSamplingLoop()
             // 灵感模式下恢复录音后，通知重建会清除反馈行，重新显示灵感提示
             if (inspirationMode) {
-                onGroupFeedback?.invoke("灵感开始记录，再次点击将存入 ${inspirationFolderName()}")
+                onGroupFeedback?.invoke("灵感开始记录，锁屏/再次点击将存入 ${inspirationFolderName()}")
             }
         } catch (e: RuntimeException) {
             Log.e(TAG, "resume failed", e)
@@ -409,6 +416,8 @@ class SegmentController(
      * 进入灵感记录模式：开新段继续录音，反馈行持续显示灵感提示文案。
      * 调用前应已通过 [performManualSegment] 截断保存上一段。
      * 灵感提示文案不被 5 秒反馈清除逻辑覆盖（不启动 segmentFeedbackJob）。
+     *
+     * 用户按电源键熄屏可正常触发 [stopInspirationByScreenOff] 保存灵感。
      */
     private fun enterInspirationMode() {
         inspirationMode = true
@@ -417,7 +426,23 @@ class SegmentController(
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
         val folderName = inspirationFolderName()
-        onGroupFeedback?.invoke("灵感开始记录，再次点击将存入 $folderName")
+        onGroupFeedback?.invoke("灵感开始记录，锁屏/再次点击将存入 $folderName")
+    }
+
+    /**
+     * 通过屏幕熄灭自动结束灵感记录。
+     *
+     * 由 [RecordingService] 收到 ACTION_SCREEN_OFF 广播时调用。仅在当前处于灵感模式时生效，
+     * 普通录音模式下忽略（[inspirationMode] == false 直接返回），不影响普通录音。
+     *
+     * 内部复用 [saveInspirationSegment] 完成落盘、上传、切回普通模式、开新段继续录音。
+     *
+     * 由于灵感模式已禁用暂停（[togglePause] 开头 guard），inspirationMode == true 时 phase 必然为
+     * Recording，此处无需额外检查 phase。
+     */
+    fun stopInspirationByScreenOff() {
+        if (!inspirationMode) return
+        saveInspirationSegment()
     }
 
     /**
@@ -758,7 +783,7 @@ class SegmentController(
                         finalizeAndUploadCurrent()
                         startNewSegment(reason = "灵感分段")
                         // startNewSegment 触发的通知重建会清除反馈行，重新显示灵感提示
-                        onGroupFeedback?.invoke("灵感开始记录，再次点击将存入 ${inspirationFolderName()}")
+                        onGroupFeedback?.invoke("灵感开始记录，锁屏/再次点击将存入 ${inspirationFolderName()}")
                     } else {
                         enterMonitoring(reason = "安静持续")
                     }

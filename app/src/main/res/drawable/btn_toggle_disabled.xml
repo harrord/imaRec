@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    暂停按钮背景（灵感模式禁用态）：实心灰色填充，8dp 圆角。
+    灵感模式期间禁用暂停功能，按钮置灰显示以向用户明确该操作当前不可用。
+    与 btn_segment_disabled 保持一致的灰色，统一禁用态视觉。
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#FF9E9E9E" />
+    <corners android:radius="8dp" />
+</shape>
