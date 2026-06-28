@@ -89,7 +89,10 @@ class SegmentController(
     private val dbWindow5s = DbWindowBuffer()
 
     private var engine: SegmentRuleEngine? = null
-    private var autoSegmentEnabled = false
+    /** 安静时暂停开关（会话开始时快照，会话期间不变）。 */
+    private var silencePauseEnabled = false
+    /** 移动时继续开关（会话开始时快照，会话期间不变）。 */
+    private var stepResumeEnabled = false
 
     /** 定时停止的协程任务，到点后调用 stopSession() 结束录音会话。 */
     private var stopTimerJob: Job? = null
@@ -164,13 +167,16 @@ class SegmentController(
     fun startSession() {
         if (phase != Phase.Idle) return
         val config = settings.config.value
-        autoSegmentEnabled = config.autoSegmentEnabled
-        engine = if (autoSegmentEnabled) buildEngine(config) else null
+        silencePauseEnabled = config.silencePauseEnabled
+        stepResumeEnabled = config.stepStartEnabled
+        // 任一开关开启即构建引擎；引擎内部按各自开关注册对应条件
+        engine = if (silencePauseEnabled || stepResumeEnabled) buildEngine(config) else null
         sessionStartMs = System.currentTimeMillis()
         segmentIndex = 0
         lastEndReason = null
         acquireWakeLock()
-        if (autoSegmentEnabled) stepProvider.start()
+        // 步数传感器仅在"移动时继续"开启时启动，避免无用功耗
+        if (stepResumeEnabled) stepProvider.start()
         startNewSegment(reason = null)
         // 定时停止：到达用户设定的时刻后自动结束会话（落盘并触发上传）
         if (config.stopAtEnabled) {
@@ -972,12 +978,15 @@ class SegmentController(
     // ── 引擎构建（扩展点：新增条件在此注册） ──
 
     private fun buildEngine(config: SegmentConfig): SegmentRuleEngine {
-        val endConditions = mutableListOf<SegmentEndCondition>(
-            SilenceSustainCondition(
+        // 结束条件（安静时暂停）：仅在 silencePauseEnabled 开启时注册
+        val endConditions = mutableListOf<SegmentEndCondition>()
+        if (config.silencePauseEnabled) {
+            endConditions += SilenceSustainCondition(
                 thresholdDb = config.silenceThresholdDb,
                 sustainMinutes = config.silenceSustainMinutes,
-            ),
-        )
+            )
+        }
+        // 开始条件（移动时继续）：仅在 stepStartEnabled 开启时注册
         val startConditions = mutableListOf<SegmentStartCondition>()
         if (config.stepStartEnabled) {
             startConditions += StepCountStartCondition(
@@ -996,7 +1005,8 @@ class SegmentController(
     }
 
     private fun updateSegmentInfo(inMonitoring: Boolean, monitoringSinceMs: Long = 0L) {
-        if (!autoSegmentEnabled) return
+        // 任一分段开关开启时才更新分段信息（用于主页状态展示）
+        if (!silencePauseEnabled && !stepResumeEnabled) return
         SegmentStateStore.update(
             SegmentInfo(
                 segmentIndex = segmentIndex,

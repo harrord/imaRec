@@ -8,7 +8,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -32,6 +34,8 @@ import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -104,6 +108,8 @@ fun SettingsScreen(
     val segmentConfig by segmentSettings.config.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val fileManager = remember { RecordingFileManager(context) }
+    val geoSettings = remember { GeoTriggerSettings.get(context) }
+    val geoConfig by geoSettings.config.collectAsStateWithLifecycle()
 
     // 删除文件夹确认弹窗的状态：待删除的文件夹 + 该文件夹下将被删除的录音列表 + 加载标记
     var pendingDeleteFolder by remember { mutableStateOf<FolderOption?>(null) }
@@ -166,192 +172,230 @@ fun SettingsScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 24.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp),
+                .padding(horizontal = 16.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text(
-                text = "IMA 知识库自动上传",
-                style = MaterialTheme.typography.titleMedium,
-            )
-
-            // 自动上传开关
-            AutoUploadToggle(
-                enabled = config.enabled,
-                onToggle = { enabled ->
-                    settings.update { it.copy(enabled = enabled) }
-                },
-            )
-
-            // 凭证与目标知识库
-            ConfigField(
-                label = "Client ID",
-                value = config.clientId,
-                onValueChange = { v -> settings.update { it.copy(clientId = v) } },
-            )
-            ApiKeyField(
-                apiKey = config.apiKey,
-                onValueChange = { v -> settings.update { it.copy(apiKey = v) } },
-            )
-            KnowledgeBasePicker(
-                selectedId = config.knowledgeBaseId,
-                selectedName = config.knowledgeBaseName,
-                onSelected = { id, name ->
-                    // 重构后知识库固定为一个：选中后写入 KB 配置，并清空旧 KB 的文件夹状态
-                    settings.setKnowledgeBase(id, name)
-                },
-            )
-
-            // ── 文件夹选择 ──
-            // 重构后 APP 操作范围限定在同一个知识库内，主页 Tab 与上传目标均为文件夹。
-            // 通过下方按钮搜索并添加文件夹：选中后加入主页 Tab 并切换为当前选中，并持久化到本地。
-            Text(
-                text = "文件夹",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(top = 8.dp),
-            )
-            Text(
-                text = "录音会上传到所选知识库的此文件夹中。主页 Tab 栏展示已添加的文件夹，可在录音中切换。删除文件夹会同步移除主页标签及该文件夹下的所有本地录音。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            FolderPicker(
-                selectedId = "",
-                selectedName = "",
-                knowledgeBaseId = config.knowledgeBaseId,
-                buttonText = "点击搜索并添加文件夹",
-                onSelected = { id, name ->
-                    // 选中文件夹后加入主页 Tab 并切换为当前选中，持久化由 ImaSettings 负责
-                    settings.addFolderAndSelect(FolderOption(id = id, name = name))
-                },
-            )
-            ActiveFolderList(
-                folders = config.activeFolders,
-                onDeleteClick = { folder -> pendingDeleteFolder = folder },
-            )
-
-            // ── 灵感目标文件夹 ──
-            // 独立于默认上传文件夹：双击锁屏分段按钮进入灵感模式后，灵感期间的录音保存并上传到此文件夹。
-            // 仅更新灵感文件夹配置，不影响默认文件夹与主页 Tab 选中态。选中后名称会显示在按钮上。
-            Text(
-                text = "灵感目标文件夹",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(top = 8.dp),
-            )
-            Text(
-                text = "锁屏分段按钮双击进入灵感模式，灵感期间的录音会保存并上传到此文件夹（不受 10 秒限制）。未配置时双击等同于单击，不进入灵感模式。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            FolderPicker(
-                selectedId = config.inspirationFolderId,
-                selectedName = config.inspirationFolderName,
-                knowledgeBaseId = config.knowledgeBaseId,
-                buttonText = "点击选择灵感目标文件夹",
-                onSelected = { id, name ->
-                    settings.setInspirationFolder(id, name)
-                },
-            )
-
-            if (!config.isConfigured) {
-                Text(
-                    text = "提示：需填写 Client ID、API Key 和知识库 ID 后才能自动上传录音。" +
-                        "凭证请在 https://ima.qq.com/agent-interface 获取。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+            // ── 卡片 1：IMA 账号与上传凭证 ──
+            SettingsCard(
+                title = "IMA 账号与上传凭证",
+                description = "配置 IMA 知识库的访问凭证与上传目标，开启后录音结束自动上传。",
+            ) {
+                AutoUploadToggle(
+                    enabled = config.enabled,
+                    onToggle = { enabled ->
+                        settings.update { it.copy(enabled = enabled) }
+                    },
                 )
-            } else if (config.enabled) {
-                Text(
-                    text = "已开启自动上传：录音结束后将自动上传到「${config.knowledgeBaseName.ifBlank { config.knowledgeBaseId }}」",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
+                ConfigField(
+                    label = "Client ID",
+                    value = config.clientId,
+                    onValueChange = { v -> settings.update { it.copy(clientId = v) } },
+                )
+                ApiKeyField(
+                    apiKey = config.apiKey,
+                    onValueChange = { v -> settings.update { it.copy(apiKey = v) } },
+                )
+                KnowledgeBasePicker(
+                    selectedId = config.knowledgeBaseId,
+                    selectedName = config.knowledgeBaseName,
+                    onSelected = { id, name ->
+                        // 重构后知识库固定为一个：选中后写入 KB 配置，并清空旧 KB 的文件夹状态
+                        settings.setKnowledgeBase(id, name)
+                    },
+                )
+                if (!config.isConfigured) {
+                    Text(
+                        text = "提示：需填写 Client ID、API Key 和知识库 ID 后才能自动上传录音。" +
+                            "凭证请在 https://ima.qq.com/agent-interface 获取。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else if (config.enabled) {
+                    Text(
+                        text = "已开启自动上传：录音结束后将自动上传到「${config.knowledgeBaseName.ifBlank { config.knowledgeBaseId }}」",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+
+            // ── 卡片 2：默认上传文件夹 ──
+            SettingsCard(
+                title = "默认上传文件夹",
+                description = "录音会上传到所选知识库的此文件夹中。主页 Tab 栏展示已添加的文件夹，可在录音中切换。删除文件夹会同步移除主页标签及该文件夹下的所有本地录音。",
+            ) {
+                FolderPicker(
+                    selectedId = "",
+                    selectedName = "",
+                    knowledgeBaseId = config.knowledgeBaseId,
+                    buttonText = "点击搜索并添加文件夹",
+                    onSelected = { id, name ->
+                        // 选中文件夹后加入主页 Tab 并切换为当前选中，持久化由 ImaSettings 负责
+                        settings.addFolderAndSelect(FolderOption(id = id, name = name))
+                    },
+                )
+                ActiveFolderList(
+                    folders = config.activeFolders,
+                    onDeleteClick = { folder -> pendingDeleteFolder = folder },
                 )
             }
 
-            // ── 自动分段 ──
+            // ── 卡片 3：灵感目标文件夹 ──
+            SettingsCard(
+                title = "灵感目标文件夹",
+                description = "锁屏分段按钮双击进入灵感模式，灵感期间的录音会保存并上传到此文件夹（不受 10 秒限制）。未配置时双击等同于单击，不进入灵感模式。",
+            ) {
+                FolderPicker(
+                    selectedId = config.inspirationFolderId,
+                    selectedName = config.inspirationFolderName,
+                    knowledgeBaseId = config.knowledgeBaseId,
+                    buttonText = "点击选择灵感目标文件夹",
+                    onSelected = { id, name ->
+                        settings.setInspirationFolder(id, name)
+                    },
+                )
+            }
+
+            // ── 卡片 4：安静时暂停 ──
+            SettingsCard(
+                title = "安静时暂停",
+                description = "录音中检测到持续安静时自动切片保存并上传，进入间隔期等待继续条件。",
+            ) {
+                SilencePauseSection(
+                    enabled = segmentConfig.silencePauseEnabled,
+                    silenceThresholdDb = segmentConfig.silenceThresholdDb,
+                    silenceSustainMinutes = segmentConfig.silenceSustainMinutes,
+                    dbCalibrationOffset = segmentConfig.dbCalibrationOffset,
+                    onToggle = { enabled ->
+                        segmentSettings.update { it.copy(silencePauseEnabled = enabled) }
+                    },
+                    onSilenceThresholdChange = { v ->
+                        segmentSettings.update { it.copy(silenceThresholdDb = v) }
+                    },
+                    onSilenceSustainChange = { v ->
+                        segmentSettings.update { it.copy(silenceSustainMinutes = v) }
+                    },
+                    onDbOffsetChange = { v ->
+                        segmentSettings.update { it.copy(dbCalibrationOffset = v) }
+                    },
+                )
+            }
+
+            // ── 卡片 5：移动时继续 ──
+            SettingsCard(
+                title = "移动时继续",
+                description = "进入间隔期后，步数累计变化达阈值时开始新片段。与「安静时暂停」相互独立。",
+            ) {
+                StepResumeSection(
+                    enabled = segmentConfig.stepStartEnabled,
+                    stepThreshold = segmentConfig.stepStartThreshold,
+                    onToggle = { enabled ->
+                        segmentSettings.update { it.copy(stepStartEnabled = enabled) }
+                    },
+                    onThresholdChange = { v ->
+                        segmentSettings.update { it.copy(stepStartThreshold = v) }
+                    },
+                )
+            }
+
+            // ── 卡片 6：暂停按钮设置 ──
+            SettingsCard(
+                title = "暂停按钮设置",
+                description = "锁屏/通知暂停按钮连续点击循环：1下=一直暂停，2下=X分钟，3下=Y分钟，4下=Z分钟，5下回到一直暂停。",
+            ) {
+                PauseDurationSection(
+                    minutesX = segmentConfig.pauseMinutesX,
+                    minutesY = segmentConfig.pauseMinutesY,
+                    minutesZ = segmentConfig.pauseMinutesZ,
+                    onChange = { x, y, z ->
+                        segmentSettings.update {
+                            it.copy(pauseMinutesX = x, pauseMinutesY = y, pauseMinutesZ = z)
+                        }
+                    },
+                )
+            }
+
+            // ── 卡片 7：定时停止 ──
+            SettingsCard(
+                title = "定时停止",
+                description = "到达设定时刻后自动结束录音，当前片段会先保存并上传。",
+            ) {
+                StopAtSection(
+                    enabled = segmentConfig.stopAtEnabled,
+                    hour = segmentConfig.stopAtHour,
+                    minute = segmentConfig.stopAtMinute,
+                    onToggle = { enabled ->
+                        segmentSettings.update { it.copy(stopAtEnabled = enabled) }
+                    },
+                    onTimeSelected = { h, m ->
+                        segmentSettings.update { it.copy(stopAtHour = h, stopAtMinute = m) }
+                    },
+                )
+            }
+
+            // ── 卡片 8：地理围栏 ──
+            SettingsCard(
+                title = "地理围栏",
+                description = "后台定时检查位置，进入预设地点偏差范围时强制分段并开新录音（文件名带地点备注）；离开范围可选自动停止。独立于录音会话运行，即使未在录音也会后台扫描。",
+            ) {
+                GeoTriggerSection(
+                    config = geoConfig,
+                    onToggle = { enabled ->
+                        if (enabled) {
+                            // 开启总开关时启动前台服务（权限在 Section 内部处理）
+                            LocationTriggerService.start(context)
+                        } else {
+                            LocationTriggerService.stop(context)
+                        }
+                        geoSettings.setEnabled(enabled)
+                    },
+                    onIntervalChange = { v -> geoSettings.update { it.copy(scanIntervalMinutes = v) } },
+                    onRadiusChange = { v -> geoSettings.update { it.copy(radiusMeters = v) } },
+                    onLeaveToStopChange = { v -> geoSettings.update { it.copy(leaveToStop = v) } },
+                    onAddLocation = { loc -> geoSettings.addLocation(loc) },
+                    onRemoveLocation = { id -> geoSettings.removeLocation(id) },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 设置卡片容器：统一的卡片外观（标题 + 可选说明 + 分隔线 + 内容）。
+ *
+ * 用于设置页 8 张卡片的统一布局，避免每张卡片重复写 Card + padding + 样式。
+ */
+@Composable
+private fun SettingsCard(
+    title: String,
+    description: String? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
             Text(
-                text = "自动分段",
+                text = title,
                 style = MaterialTheme.typography.titleMedium,
             )
-            Text(
-                text = "开启后录音全程不停止，按条件自动切片保存并上传；切片后进入监测间隔期，等待“继续条件”满足再开新片段。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            AutoSegmentSection(
-                config = segmentConfig,
-                onToggle = { enabled -> segmentSettings.update { it.copy(autoSegmentEnabled = enabled) } },
-                onSilenceThresholdChange = { v -> segmentSettings.update { it.copy(silenceThresholdDb = v) } },
-                onSilenceSustainChange = { v -> segmentSettings.update { it.copy(silenceSustainMinutes = v) } },
-                onStepEnabledChange = { v -> segmentSettings.update { it.copy(stepStartEnabled = v) } },
-                onStepThresholdChange = { v -> segmentSettings.update { it.copy(stepStartThreshold = v) } },
-                onDbOffsetChange = { v -> segmentSettings.update { it.copy(dbCalibrationOffset = v) } },
-            )
-
-            // ── 定时停止 ──
-            Text(
-                text = "定时停止",
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Text(
-                text = "到达设定时刻后自动结束录音，当前片段会先保存并上传。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            StopAtSection(
-                enabled = segmentConfig.stopAtEnabled,
-                hour = segmentConfig.stopAtHour,
-                minute = segmentConfig.stopAtMinute,
-                onToggle = { enabled ->
-                    segmentSettings.update { it.copy(stopAtEnabled = enabled) }
-                },
-                onTimeSelected = { h, m ->
-                    segmentSettings.update { it.copy(stopAtHour = h, stopAtMinute = m) }
-                },
-            )
-
-            // ── 暂停时长 ──
-            Text(
-                text = "暂停时长",
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Text(
-                text = "锁屏/通知暂停按钮连续点击循环：1下=一直暂停，2下=X分钟，3下=Y分钟，4下=Z分钟，5下回到一直暂停。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            PauseDurationSection(
-                minutesX = segmentConfig.pauseMinutesX,
-                minutesY = segmentConfig.pauseMinutesY,
-                minutesZ = segmentConfig.pauseMinutesZ,
-                onChange = { x, y, z ->
-                    segmentSettings.update {
-                        it.copy(pauseMinutesX = x, pauseMinutesY = y, pauseMinutesZ = z)
-                    }
-                },
-            )
-
-            // ── 地理触发录音 ──
-            // 后台定时检查设备位置，进入预设地点偏差范围时强制分段+开新录音，离开时可选自动停止。
-            // 独立于录音会话运行，即使未在录音也会后台扫描。总开关默认关闭。
-            val geoSettings = remember { GeoTriggerSettings.get(context) }
-            val geoConfig by geoSettings.config.collectAsStateWithLifecycle()
-            GeoTriggerSection(
-                config = geoConfig,
-                onToggle = { enabled ->
-                    if (enabled) {
-                        // 开启总开关时启动前台服务（权限在 Section 内部处理）
-                        LocationTriggerService.start(context)
-                    } else {
-                        LocationTriggerService.stop(context)
-                    }
-                    geoSettings.setEnabled(enabled)
-                },
-                onIntervalChange = { v -> geoSettings.update { it.copy(scanIntervalMinutes = v) } },
-                onRadiusChange = { v -> geoSettings.update { it.copy(radiusMeters = v) } },
-                onLeaveToStopChange = { v -> geoSettings.update { it.copy(leaveToStop = v) } },
-                onAddLocation = { loc -> geoSettings.addLocation(loc) },
-                onRemoveLocation = { id -> geoSettings.removeLocation(id) },
-            )
+            if (description != null) {
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            HorizontalDivider()
+            content()
         }
     }
 }
@@ -417,77 +461,97 @@ private fun PauseDurationSection(
     }
 }
 
+/**
+ * 安静时暂停卡片内容：独立开关 + 安静阈值 + 安静持续时长 + 分贝校准偏移。
+ *
+ * 开关关闭时仅显示开关行，其他字段隐藏。与「移动时继续」完全独立。
+ */
 @Composable
-private fun AutoSegmentSection(
-    config: SegmentConfig,
+private fun SilencePauseSection(
+    enabled: Boolean,
+    silenceThresholdDb: Int,
+    silenceSustainMinutes: Int,
+    dbCalibrationOffset: Int,
     onToggle: (Boolean) -> Unit,
     onSilenceThresholdChange: (Int) -> Unit,
     onSilenceSustainChange: (Int) -> Unit,
-    onStepEnabledChange: (Boolean) -> Unit,
-    onStepThresholdChange: (Int) -> Unit,
     onDbOffsetChange: (Int) -> Unit,
 ) {
-    androidx.compose.foundation.layout.Row(
+    Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Column(modifier = Modifier.padding(end = 16.dp)) {
-            Text(text = "启用自动分段", style = MaterialTheme.typography.bodyLarge)
+            Text(text = "启用安静时暂停", style = MaterialTheme.typography.bodyLarge)
             Text(
-                text = "录音不停止，按条件自动切片",
+                text = "安静持续达阈值后切片保存并上传",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Switch(checked = config.autoSegmentEnabled, onCheckedChange = onToggle)
+        Switch(checked = enabled, onCheckedChange = onToggle)
     }
 
-    if (!config.autoSegmentEnabled) return
+    if (!enabled) return
 
     IntField(
         label = "安静阈值（dB SPL，0~120）",
-        value = config.silenceThresholdDb,
+        value = silenceThresholdDb,
         onChange = onSilenceThresholdChange,
     )
     IntField(
         label = "安静持续时长（分钟）",
-        value = config.silenceSustainMinutes,
+        value = silenceSustainMinutes,
         onChange = onSilenceSustainChange,
     )
-
-    androidx.compose.foundation.layout.Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Column(modifier = Modifier.padding(end = 16.dp)) {
-            Text(text = "步数继续", style = MaterialTheme.typography.bodyLarge)
-            Text(
-                text = "间隔期步数变化达阈值后开始新片段",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Switch(checked = config.stepStartEnabled, onCheckedChange = onStepEnabledChange)
-    }
-    if (config.stepStartEnabled) {
-        IntField(
-            label = "步数变化阈值（步）",
-            value = config.stepStartThreshold,
-            onChange = onStepThresholdChange,
-        )
-    }
-
     IntField(
         label = "分贝校准偏移（高级，默认 90）",
-        value = config.dbCalibrationOffset,
+        value = dbCalibrationOffset,
         onChange = onDbOffsetChange,
     )
     Text(
         text = "分贝为相对估算值（dBFS + 偏移），不同设备有差异，可在此校准。",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+/**
+ * 移动时继续卡片内容：独立开关 + 步数变化阈值。
+ *
+ * 与「安静时暂停」完全独立：可单独开启，但实际只在录音进入间隔期后才会触发
+ * 步数继续条件（间隔期由「安静时暂停」产生）。
+ */
+@Composable
+private fun StepResumeSection(
+    enabled: Boolean,
+    stepThreshold: Int,
+    onToggle: (Boolean) -> Unit,
+    onThresholdChange: (Int) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.padding(end = 16.dp)) {
+            Text(text = "启用移动时继续", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = "间隔期步数变化达阈值后开始新片段",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(checked = enabled, onCheckedChange = onToggle)
+    }
+
+    if (!enabled) return
+
+    IntField(
+        label = "步数变化阈值（步）",
+        value = stepThreshold,
+        onChange = onThresholdChange,
     )
 }
 
@@ -1053,9 +1117,10 @@ private fun DeleteFolderDialog(
 // ── 地理触发录音设置 ──
 
 /**
- * 地理触发录音设置区域。
+ * 地理围栏卡片内容区域。
  *
- * 包含：总开关（默认关闭，开启时请求定位权限并启动前台服务）、扫描间隔、偏差范围、
+ * 卡片标题与说明文案由外层 [SettingsCard] 提供，本 Composable 仅输出：
+ * 总开关（默认关闭，开启时请求定位权限并启动前台服务）、扫描间隔、偏差范围、
  * 离开停止开关、预设地点列表（可删除）、添加地点入口（弹窗支持照片 EXIF 与当前定位两种方式）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1071,16 +1136,6 @@ private fun GeoTriggerSection(
 ) {
     val context = LocalContext.current
     var showAddDialog by rememberSaveable { mutableStateOf(false) }
-
-    Text(
-        text = "地理触发录音",
-        style = MaterialTheme.typography.titleMedium,
-    )
-    Text(
-        text = "后台定时检查位置，进入预设地点的偏差范围时强制分段并开新录音（文件名带地点备注）；离开范围可选自动停止。独立于录音会话运行，即使未在录音也会后台扫描。",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
 
     // 总开关：开启时需先请求定位权限（前台 + 后台），权限被拒时回退开关并 Toast
     val permissionLauncher = rememberLauncherForActivityResult(

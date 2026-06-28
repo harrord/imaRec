@@ -9,17 +9,22 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * 自动分段功能配置。
  *
- * 对应"录音开始后自动按条件切片保存并上传"的功能：
- * - [autoSegmentEnabled]：总开关
- * - 安静切片（结束条件）：分贝低于 [silenceThresholdDb] 持续 [silenceSustainMinutes] 分钟，触发保存+上传，进入间隔期
- * - 步数继续（开始条件）：进入间隔期后，步数累计变化达 [stepStartThreshold] 步，开始新片段
+ * 拆分为两个完全独立的开关（卡片化设置）：
+ * - [silencePauseEnabled]：安静时暂停开关。分贝低于 [silenceThresholdDb] 持续
+ *   [silenceSustainMinutes] 分钟，触发保存+上传并进入间隔期。
+ * - [stepStartEnabled]：移动时继续开关。进入间隔期后，步数累计变化达
+ *   [stepStartThreshold] 步，开始新片段。与 [silencePauseEnabled] 完全独立。
+ *
+ * 两个开关相互独立：可以只开其中一个，也可以两个都开或都关。
+ * 注意：若只开 [stepStartEnabled] 而不开 [silencePauseEnabled]，录音不会进入
+ * 间隔期，步数继续条件实际不会触发——这是用户明确选择的方案 A（完全独立）。
  *
  * 新增条件时，在此 data class 加对应参数，并在 load/save 补键。
  *
- * @param autoSegmentEnabled 是否开启自动分段
+ * @param silencePauseEnabled 是否开启"安静时暂停"（安静切片结束条件）
  * @param silenceThresholdDb 安静阈值（近似 dB SPL 正值），低于此值视为安静
  * @param silenceSustainMinutes 安静需持续的分钟数，达到后触发切片
- * @param stepStartEnabled 是否启用"步数变化"作为继续（开始新片段）条件
+ * @param stepStartEnabled 是否开启"移动时继续"（步数变化开始条件）
  * @param stepStartThreshold 步数变化阈值，累计达此值后开始新片段
  * @param dbCalibrationOffset dBFS → dB SPL 的校准偏移量，默认 90
  * @param stopAtEnabled 是否启用定时停止：到达设定的时刻自动结束录音会话
@@ -37,7 +42,7 @@ import kotlinx.coroutines.flow.asStateFlow
  * - 第 5 下 → 一直暂停（回到第 1 档，循环）
  */
 data class SegmentConfig(
-    val autoSegmentEnabled: Boolean = false,
+    val silencePauseEnabled: Boolean = false,
     val silenceThresholdDb: Int = 50,
     val silenceSustainMinutes: Int = 5,
     val stepStartEnabled: Boolean = true,
@@ -71,7 +76,9 @@ class SegmentSettings private constructor(context: Context) {
     }
 
     private fun load(): SegmentConfig = SegmentConfig(
-        autoSegmentEnabled = prefs.getBoolean(KEY_AUTO_ENABLED, false),
+        // 复用旧键 auto_segment_enabled 作为 silencePauseEnabled 的存储键，
+        // 老用户升级后原总开关状态自动迁移为"安静时暂停"开关状态
+        silencePauseEnabled = prefs.getBoolean(KEY_SILENCE_PAUSE_ENABLED, false),
         silenceThresholdDb = prefs.getInt(KEY_SILENCE_THRESHOLD, 50),
         silenceSustainMinutes = prefs.getInt(KEY_SILENCE_SUSTAIN, 5),
         stepStartEnabled = prefs.getBoolean(KEY_STEP_ENABLED, true),
@@ -87,7 +94,7 @@ class SegmentSettings private constructor(context: Context) {
 
     private fun save(config: SegmentConfig) {
         prefs.edit().apply {
-            putBoolean(KEY_AUTO_ENABLED, config.autoSegmentEnabled)
+            putBoolean(KEY_SILENCE_PAUSE_ENABLED, config.silencePauseEnabled)
             putInt(KEY_SILENCE_THRESHOLD, config.silenceThresholdDb)
             putInt(KEY_SILENCE_SUSTAIN, config.silenceSustainMinutes)
             putBoolean(KEY_STEP_ENABLED, config.stepStartEnabled)
@@ -113,7 +120,9 @@ class SegmentSettings private constructor(context: Context) {
             }
 
         private const val PREFS_NAME = "segment_settings"
-        private const val KEY_AUTO_ENABLED = "auto_segment_enabled"
+        // 复用旧键名 auto_segment_enabled 作为 silencePauseEnabled 的存储键，
+        // 保证老用户升级后原"自动分段总开关"状态平滑迁移为"安静时暂停"开关状态
+        private const val KEY_SILENCE_PAUSE_ENABLED = "auto_segment_enabled"
         private const val KEY_SILENCE_THRESHOLD = "silence_threshold_db"
         private const val KEY_SILENCE_SUSTAIN = "silence_sustain_minutes"
         private const val KEY_STEP_ENABLED = "step_start_enabled"
