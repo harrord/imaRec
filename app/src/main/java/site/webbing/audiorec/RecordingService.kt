@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import site.webbing.audiorec.segment.SegmentController
 import site.webbing.audiorec.segment.SegmentSettings
 import site.webbing.audiorec.segment.StepSensorProvider
@@ -171,7 +172,13 @@ class RecordingService : Service() {
     override fun onDestroy() {
         // 兜底：确保会话资源释放
         // 使用 runBlocking 同步等待 stopSession 完成，确保 WakeLock/传感器在 scope.cancel 前释放
-        if (controller.isActive) runBlocking { controller.stopSession() }
+        // 限制 5 秒超时：若 recorder.stop() 等异常卡住，放弃等待以避免主线程 ANR；
+        // WakeLock 自身有 4 小时超时兜底，不会永久泄漏
+        if (controller.isActive) {
+            runBlocking {
+                withTimeoutOrNull(5_000L) { controller.stopSession() }
+            }
+        }
         stopLockscreenRefresh()
         unregisterScreenOffReceiver()
         scope.cancel()

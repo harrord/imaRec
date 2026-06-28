@@ -888,7 +888,11 @@ class SegmentController(
             } else {
                 retagFolderId
             }
-            val finalFile = if (effectiveFolderId != null) fileManager.retagFolderId(file, effectiveFolderId) else file
+            val finalFile = if (effectiveFolderId != null) {
+                withContext(Dispatchers.IO) { fileManager.retagFolderId(file, effectiveFolderId) }
+            } else {
+                file
+            }
             val durationMs = getSegmentDurationMs(finalFile)
             if (!inspirationMode && durationMs < MIN_SEGMENT_DURATION_MS) {
                 // 普通模式：10 秒以内的片段保留到本地，但不上传。
