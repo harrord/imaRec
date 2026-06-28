@@ -4,12 +4,13 @@
     从左到右三部分，三个按钮通过 layout_weight=1 等分占满卡片内宽，
     左右各距卡片边缘 12dp（由外层 padding 决定），按钮间 8dp 间距：
       1. 分组 Button —— 切换知识库并触发 5 秒后台倒计时后分段
-      2. 分段 Button —— 实心填充，36dp 高，13sp 字，录音态绿色/暂停态灰色
+      2. 灵感 Button —— 实心填充，36dp 高，13sp 字，单击记录灵感（先分段保存前一段再进入灵感模式），
+         灵感模式中单击保存灵感；未配置灵感文件夹/暂停态置灰不可点击
       3. 暂停/继续 Button —— 实心填充，36dp 高，13sp 字，录音态绿色(暂停)/暂停态琥珀色(继续)
 
     状态文案仅在状态切换时更新，不周期性 notify()，避免按钮点击事件被 View 重建吞掉。
     文字居中，避免文字溢出圆角框。
-    分组反馈行（feedback_text）默认隐藏，点击分组/分段按钮后显示，5 秒后由后台倒计时清除。
+    分组反馈行（feedback_text）默认隐藏，点击分组/灵感按钮后显示，5 秒后由后台倒计时清除。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
@@ -42,7 +43,7 @@
             android:gravity="center"
             android:background="@drawable/btn_segment_recording" />
 
-        <!-- 第 2 部分：分段按钮 -->
+        <!-- 第 2 部分：灵感按钮（单击记录灵感，未配置/暂停态置灰） -->
         <Button
             android:id="@+id/segment_button"
             android:layout_width="0dp"
@@ -52,7 +53,7 @@
             android:minWidth="0dp"
             android:minHeight="0dp"
             android:padding="0dp"
-            android:text="分段"
+            android:text="灵感"
             android:textSize="13sp"
             android:textStyle="bold"
             android:textColor="#FFFFFFFF"
@@ -78,7 +79,7 @@
     </LinearLayout>
 
     <!-- 提示行：始终可见，固定 16dp 高度保证卡片高度恒定。
-         默认文案随录音状态切换（录音中/已暂停），点击分组/分段按钮后临时显示反馈，
+         默认文案随录音状态切换（录音中/已暂停），点击分组/灵感按钮后临时显示反馈，
          倒计时结束后恢复默认文案。单行居中，超长省略。
          文字颜色由代码根据系统深色/浅色模式动态设置，保证可识别性。 -->
     <TextView

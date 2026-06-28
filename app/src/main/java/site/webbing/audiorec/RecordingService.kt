@@ -21,6 +21,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import site.webbing.audiorec.segment.SegmentController
@@ -49,6 +51,7 @@ import site.webbing.audiorec.segment.StepSensorProvider
 class RecordingService : Service() {
     private lateinit var notificationHelper: NotificationHelper
     private lateinit var controller: SegmentController
+    private lateinit var imaSettings: ImaSettings
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private var mediaSession: MediaSessionCompat? = null
@@ -56,6 +59,13 @@ class RecordingService : Service() {
     // 锁屏控件周期性刷新协程（每 10 分钟 notify 一次，重新参与系统通知排序）。
     // 仅在 Recording / Paused / Monitoring 态运行；回到 Idle 时由 stopForegroundSafely 取消。
     private var lockscreenRefreshJob: Job? = null
+
+    /**
+     * 灵感文件夹配置变更监听协程。录音会话期间，用户在设置中配置/取消配置灵感文件夹后，
+     * 锁屏「灵感」按钮的启用/禁用态需随之更新。仅监听 [ImaConfig.inspirationFolderId] 变化，
+     * 变化时重建通知刷新按钮。仅在活跃会话期间运行；回到 Idle 时取消。
+     */
+    private var configObserverJob: Job? = null
 
     /**
      * 屏幕熄屏广播接收器：仅在录音会话活跃期间注册。
@@ -70,6 +80,7 @@ class RecordingService : Service() {
         super.onCreate()
         notificationHelper = NotificationHelper(this)
         notificationHelper.createChannel()
+        imaSettings = ImaSettings.get(this)
 
         controller = SegmentController(
             service = this,
@@ -172,6 +183,7 @@ class RecordingService : Service() {
         )
         controller.startSession()
         startLockscreenRefresh()
+        startConfigObserver()
         // 注册屏幕熄屏监听：用户按电源键熄屏时，若处于灵感模式则自动保存灵感
         registerScreenOffReceiver()
     }
@@ -194,6 +206,7 @@ class RecordingService : Service() {
 
     private fun stopForegroundSafely() {
         stopLockscreenRefresh()
+        stopConfigObserver()
         unregisterScreenOffReceiver()
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -243,6 +256,37 @@ class RecordingService : Service() {
     private fun stopLockscreenRefresh() {
         lockscreenRefreshJob?.cancel()
         lockscreenRefreshJob = null
+    }
+
+    // ── 灵感文件夹配置变更监听 ──
+
+    /**
+     * 启动灵感文件夹配置变更监听协程。
+     *
+     * 录音会话期间，用户可能在设置中配置或取消配置灵感目标文件夹。此时锁屏「灵感」按钮的
+     * 启用/禁用态需随之更新：未配置时置灰不可点击，配置后变为可用。
+     *
+     * 仅监听 [ImaConfig.inspirationFolderId] 字段变化（[map] + [distinctUntilChanged] 过滤），
+     * 避免其他配置项变化（如 activeFolders、currentFolderId）触发不必要的通知重建。
+     * 变化时以当前录音状态重建通知，刷新按钮可用态。回到 Idle 时由 [stopConfigObserver] 取消。
+     */
+    private fun startConfigObserver() {
+        if (configObserverJob?.isActive == true) return
+        configObserverJob = scope.launch {
+            imaSettings.config
+                .map { it.inspirationFolderId }
+                .distinctUntilChanged()
+                .collect {
+                    val status = RecordingStateStore.status.value
+                    if (status is RecordingStatus.Idle) return@collect
+                    notificationHelper.updateRecordingNotification(status, mediaSession?.sessionToken)
+                }
+        }
+    }
+
+    private fun stopConfigObserver() {
+        configObserverJob?.cancel()
+        configObserverJob = null
     }
 
     // ── 屏幕熄屏监听（灵感模式自动保存） ──

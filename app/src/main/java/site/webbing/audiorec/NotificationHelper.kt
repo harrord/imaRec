@@ -22,9 +22,9 @@ private const val LEGACY_CHANNEL_ID = "recording_channel"
  * 录音通知构建器。
  *
  * 录音中 / 暂停态使用自定义 RemoteViews 三部分卡片：
- *   [分组 Button] —— [分段 Button] —— [暂停/继续 Button]
+ *   [分组 Button] —— [灵感 Button] —— [暂停/继续 Button]
  *
- * 状态文案已移除，录音/暂停状态仅靠按钮体现（分段置灰=暂停，暂停↔继续文字切换）。
+ * 状态文案已移除，录音/暂停状态仅靠按钮体现（灵感置灰=暂停，暂停↔继续文字切换）。
  * 不再做周期性 notify() 刷新（原声波动画每 200ms 重建 RemoteViews，
  * 会在用户点击过程中替换 View 层级，导致 ACTION_DOWN/UP 落不到同一 View，
  * 按钮点击被吞掉）。notify() 仅在状态变化、分组点击反馈、5 秒倒计时结束时触发，均为事件驱动。
@@ -34,6 +34,15 @@ private const val LEGACY_CHANNEL_ID = "recording_channel"
  * 提示行始终可见：无反馈时显示默认文案（录音中/已暂停），有反馈时显示反馈文案，
  * 倒计时结束后由调用方传入 null 恢复默认文案。
  *
+ * 灵感按钮（原「分段」按钮，现仅做灵感记录入口，单击立即响应，无双击检测）：
+ * - 普通录音态 + 已配置灵感文件夹：单击执行一次普通分段（保存前一段）后进入灵感模式，
+ *   反馈行显示"灵感开始记录，锁屏/再次点击将存入 xx"。按钮文案"灵感"，背景 btn_segment_recording。
+ * - 灵感模式中：单击保存灵感到灵感文件夹并回到普通模式，反馈行显示"灵感已保存到「xx」"。
+ *   按钮文案"灵感.."，背景 btn_segment_inspiration（呼吸动画）。
+ * - 未配置灵感文件夹（普通录音态）：按钮置灰 btn_segment_disabled，不响应点击。
+ * - 暂停态 / 暂停选择窗口期间：按钮置灰不可点击（暂停态优先级最高，灵感态无法与之共存，
+ *   因 togglePause 在灵感模式下被 guard）。
+ *
  * 暂停按钮连续点击循环（5 秒选择窗口）：
  * - Recording 态点击 → 进入选择窗口，按钮文本保持"暂停"、提示"5 秒后暂停"
  * - 5 秒内连续点击 → 按 4 档循环（一直暂停 / X 分钟 / Y 分钟 / Z 分钟）切换提示
@@ -42,9 +51,9 @@ private const val LEGACY_CHANNEL_ID = "recording_channel"
  * - 暂停态点击 → 立即恢复录音
  *
  * 按钮外观：
- * - 录音态：分组/分段绿色、暂停绿色（"暂停"文案）
- * - 选择窗口态：分组/分段灰色禁用、暂停绿色（"暂停"文案）
- * - 暂停态：分组/分段灰色禁用、继续琥珀色（"继续"文案）
+ * - 录音态：分组/灵感绿色、暂停绿色（"暂停"文案）
+ * - 选择窗口态：分组/灵感灰色禁用、暂停绿色（"暂停"文案）
+ * - 暂停态：分组/灵感灰色禁用、继续琥珀色（"继续"文案）
  * 尺寸固定 72x36dp，13sp 加粗白字，8dp 圆角实心填充。
  */
 class NotificationHelper(private val context: Context) {
@@ -167,8 +176,13 @@ class NotificationHelper(private val context: Context) {
      * - 提示行文案：选择窗口期间显示当前档位（"5 秒后暂停"/"暂停 X 分钟"…），
      *   定时暂停期间显示"暂停剩余 N 分钟"
      *
-     * 通知状态由调用方传入（Recording 或 Paused），决定按钮颜色与分组/分段是否可用。
+     * 通知状态由调用方传入（Recording 或 Paused），决定按钮颜色与分组/灵感是否可用。
      * 提示行文案由 [hintText] 覆盖默认文案。
+     *
+     * 灵感按钮启用条件汇总：按钮可点击当且仅当 inspirationMode == true 或
+     * （!isPaused && 处于普通录音态 && 灵感文件夹已配置 && 不在暂停选择窗口）。
+     * 实际上灵感态与暂停态/暂停选择窗口互斥（[SegmentController.togglePause] 在灵感模式下被 guard），
+     * 因此灵感态在此分支中不会出现，此处保留灵感态可用判断仅作防御。
      */
     fun updatePauseFeedback(
         status: RecordingStatus,
@@ -180,8 +194,10 @@ class NotificationHelper(private val context: Context) {
         val isPaused = status is RecordingStatus.Paused
         val views = RemoteViews(context.packageName, R.layout.notification_recording).apply {
             val groupEnabled = !isPaused && imaSettings.config.value.activeFolders.size >= 2
-            // 灵感模式下分段按钮文案保持"灵感.."，即使进入暂停选择窗口/暂停态也维持提示
-            val segmentText = if (InspirationModeStore.active.value) "灵感.." else "分段"
+            val inspirationActive = InspirationModeStore.active.value
+            val inspirationConfigured = imaSettings.config.value.inspirationFolderId.isNotBlank()
+            // 灵感模式下按钮文案保持"灵感.."，普通态显示"灵感"
+            val segmentText = if (inspirationActive) "灵感.." else "灵感"
             setTextViewText(R.id.segment_button, segmentText)
             setTextViewText(R.id.toggle_button, toggleText)
             setInt(
@@ -189,14 +205,14 @@ class NotificationHelper(private val context: Context) {
                 "setBackgroundResource",
                 if (isPaused) R.drawable.btn_toggle_paused else R.drawable.btn_toggle_recording,
             )
-            // 灵感模式下分段按钮保持呼吸动画，即使进入暂停选择窗口/暂停态
-            val inspirationActive = InspirationModeStore.active.value
+            // 灵感按钮背景：暂停态/未配置置灰，灵感态呼吸动画，普通录音态绿色
             setInt(
                 R.id.segment_button,
                 "setBackgroundResource",
                 when {
                     isPaused -> R.drawable.btn_segment_disabled
                     inspirationActive -> R.drawable.btn_segment_inspiration
+                    !inspirationConfigured -> R.drawable.btn_segment_disabled
                     else -> R.drawable.btn_segment_recording
                 },
             )
@@ -205,17 +221,21 @@ class NotificationHelper(private val context: Context) {
                 "setBackgroundResource",
                 if (groupEnabled) R.drawable.btn_segment_recording else R.drawable.btn_segment_disabled,
             )
-            // 选择窗口与暂停态均禁用分组/分段点击，避免打断暂停流程
-            if (isPaused || toggleText == "暂停") {
-                setOnClickPendingIntent(R.id.segment_button, null)
-                setOnClickPendingIntent(R.id.group_button, null)
-            } else {
+            // 灵感按钮可点击条件：灵感态（保存灵感）或（普通录音态且已配置且不在暂停选择窗口/暂停态）
+            // 选择窗口与暂停态均禁用分组/灵感点击，避免打断暂停流程
+            val segmentClickable = inspirationActive ||
+                (!isPaused && toggleText != "暂停" && inspirationConfigured)
+            if (segmentClickable) {
                 setOnClickPendingIntent(R.id.segment_button, segmentPendingIntent())
-                if (groupEnabled) {
-                    setOnClickPendingIntent(R.id.group_button, groupPendingIntent())
-                } else {
-                    setOnClickPendingIntent(R.id.group_button, null)
-                }
+            } else {
+                setOnClickPendingIntent(R.id.segment_button, null)
+            }
+            if (isPaused || toggleText == "暂停") {
+                setOnClickPendingIntent(R.id.group_button, null)
+            } else if (groupEnabled) {
+                setOnClickPendingIntent(R.id.group_button, groupPendingIntent())
+            } else {
+                setOnClickPendingIntent(R.id.group_button, null)
             }
             setOnClickPendingIntent(R.id.toggle_button, togglePendingIntent())
             setTextViewText(R.id.feedback_text, hintText)
@@ -251,11 +271,12 @@ class NotificationHelper(private val context: Context) {
         status: RecordingStatus? = null,
     ): RemoteViews =
         RemoteViews(context.packageName, R.layout.notification_recording).apply {
-            // 分组按钮：仅在录音态且主页 Tab ≥ 2 时可用；选择窗口/暂停态均置灰禁用
+            // 分组按钮：仅在录音态且主页 Tab ≥ 2 时可用；暂停态置灰禁用
             val groupEnabled = !isPaused && imaSettings.config.value.activeFolders.size >= 2
-            // 灵感模式下分段按钮文案改为"灵感.."，提示用户当前为灵感记录态
+            // 灵感模式下按钮文案改为"灵感.."，普通态显示"灵感"
             val inspirationActive = InspirationModeStore.active.value
-            val segmentText = if (inspirationActive) "灵感.." else "分段"
+            val inspirationConfigured = imaSettings.config.value.inspirationFolderId.isNotBlank()
+            val segmentText = if (inspirationActive) "灵感.." else "灵感"
             // 暂停按钮文本：
             // - Recording：暂停
             // - Paused（一直/定时）：继续
@@ -274,9 +295,9 @@ class NotificationHelper(private val context: Context) {
             }
             setTextViewText(R.id.segment_button, segmentText)
             setTextViewText(R.id.toggle_button, toggleText)
-            // 暂停态：继续按钮用琥珀色，分段 + 分组按钮置灰禁用
-            // 录音态：暂停按钮用绿色，分段 + 分组按钮可用绿色
-            // 灵感模式下分段按钮用帧动画（呼吸效果），非灵感态用静态绿色
+            // 暂停态：继续按钮用琥珀色，灵感 + 分组按钮置灰禁用
+            // 录音态：暂停按钮用绿色，灵感 + 分组按钮可用绿色
+            // 灵感模式下灵感按钮用帧动画（呼吸效果），非灵感态用静态绿色
             // 灵感模式下暂停按钮置灰（btn_toggle_disabled），向用户明确该操作当前不可用
             setInt(
                 R.id.toggle_button,
@@ -287,12 +308,14 @@ class NotificationHelper(private val context: Context) {
                     else -> R.drawable.btn_toggle_recording
                 },
             )
+            // 灵感按钮背景：暂停态/未配置灵感文件夹置灰，灵感态呼吸动画，普通录音态绿色
             setInt(
                 R.id.segment_button,
                 "setBackgroundResource",
                 when {
                     isPaused -> R.drawable.btn_segment_disabled
                     inspirationActive -> R.drawable.btn_segment_inspiration
+                    !inspirationConfigured -> R.drawable.btn_segment_disabled
                     else -> R.drawable.btn_segment_recording
                 },
             )
@@ -301,17 +324,19 @@ class NotificationHelper(private val context: Context) {
                 "setBackgroundResource",
                 if (groupEnabled) R.drawable.btn_segment_recording else R.drawable.btn_segment_disabled,
             )
-            // 暂停态或无可切换知识库时，禁用分段 + 分组按钮的点击（仍显示文案，但不响应）
-            if (isPaused) {
+            // 灵感按钮可点击条件：灵感态（保存灵感）或（普通录音态且已配置灵感文件夹）
+            // 暂停态下灵感按钮置灰不可点击
+            val segmentClickable = inspirationActive || (!isPaused && inspirationConfigured)
+            if (segmentClickable) {
+                setOnClickPendingIntent(R.id.segment_button, segmentPendingIntent())
+            } else {
                 setOnClickPendingIntent(R.id.segment_button, null)
+            }
+            // 分组按钮：暂停态或无可切换知识库时禁用点击
+            if (isPaused || !groupEnabled) {
                 setOnClickPendingIntent(R.id.group_button, null)
             } else {
-                setOnClickPendingIntent(R.id.segment_button, segmentPendingIntent())
-                if (groupEnabled) {
-                    setOnClickPendingIntent(R.id.group_button, groupPendingIntent())
-                } else {
-                    setOnClickPendingIntent(R.id.group_button, null)
-                }
+                setOnClickPendingIntent(R.id.group_button, groupPendingIntent())
             }
             // 灵感模式下禁用暂停按钮点击；暂停态保持继续按钮可点击
             if (pauseDisabledByInspiration) {

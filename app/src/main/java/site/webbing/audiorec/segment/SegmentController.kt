@@ -113,25 +113,18 @@ class SegmentController(
     private var kbSwitchJob: Job? = null
 
     /**
-     * 分段按钮反馈的清除任务。点击分段按钮后显示反馈行（当前片段保存到的知识库），
-     * 5 秒后由此任务清除。与 [kbSwitchJob] 互斥：分段点击取消分组倒计时，分组点击取消本任务。
+     * 灵感按钮反馈的清除任务。点击灵感按钮后显示反馈行（当前片段保存到的知识库），
+     * 5 秒后由此任务清除。与 [kbSwitchJob] 互斥：灵感点击取消分组倒计时，分组点击取消本任务。
      */
     private var segmentFeedbackJob: Job? = null
 
     /**
-     * 分段按钮双击检测的延迟任务。第一次点击后启动 [DOUBLE_CLICK_WINDOW_MS] 计时，
-     * 期间无第二次点击则视为单击执行普通分段；有第二次点击则触发双击进入灵感模式。
-     * 灵感模式下不启用双击检测（任何点击立即保存灵感录音）。
-     */
-    private var segmentClickJob: Job? = null
-
-    /**
      * 是否处于灵感记录模式。
      *
-     * 双击分段按钮进入：开新段继续录音，反馈行持续显示
+     * 单击灵感按钮进入：开新段继续录音，反馈行持续显示
      * "灵感开始记录，锁屏/再次点击将存入 xx"，期间产生的录音（手动保存或自动分段）
      * 一律归到灵感目标文件夹 [ImaConfig.inspirationFolderId]，且不受 10 秒上传限制。
-     * 保存灵感有两种方式：再次点击分段按钮（单击/双击均识别为单击），或按下电源键熄屏
+     * 保存灵感有两种方式：再次点击灵感按钮，或按下电源键熄屏
      * （由 [stopInspirationByScreenOff] 触发）。保存后回到普通模式。
      * 灵感模式期间禁用暂停（[togglePause] guard）。
      */
@@ -220,19 +213,16 @@ class SegmentController(
     /**
      * 进入暂停选择窗口：count=1（一直暂停），启动 5 秒倒计时。
      * 录音继续进行，仅刷新通知按钮文本为"暂停"、提示行为"5 秒后暂停"。
-     * 同时取消分组/分段按钮可能挂起的反馈任务，避免与暂停选择反馈行冲突。
+     * 同时取消分组/灵感按钮可能挂起的反馈任务，避免与暂停选择反馈行冲突。
      */
     private fun enterPauseSelecting(file: File) {
         pauseSelectCount = 1
         phase = Phase.PauseSelecting
-        // 选择窗口期间取消分组/分段反馈，提示行由暂停选择接管
+        // 选择窗口期间取消分组/灵感反馈，提示行由暂停选择接管
         kbSwitchJob?.cancel()
         kbSwitchJob = null
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
-        // 取消分段按钮可能挂起的双击检测，避免暂停期间触发分段
-        segmentClickJob?.cancel()
-        segmentClickJob = null
         onPauseFeedback?.invoke("暂停", "5 秒后暂停")
         startPauseSelectJob(file)
     }
@@ -351,55 +341,27 @@ class SegmentController(
     }
 
     /**
-     * 分段按钮点击入口。按当前是否处于灵感模式与双击状态分流：
+     * 灵感按钮单击入口。移除双击检测，单击立即响应：
      *
-     * - 灵感模式：任何点击（单击或双击）立即保存灵感录音到灵感目标知识库并回到普通模式，
-     *   不启用双击检测。
-     * - 普通模式 + 第一次点击：启动 [DOUBLE_CLICK_WINDOW_MS] 延迟计时，期间无第二次点击
-     *   则视为单击执行普通分段；有第二次点击则触发双击。
-     * - 普通模式 + 1 秒内第二次点击（双击）：
-     *   - 灵感目标文件夹已配置：执行一次普通分段（截断保存当前段），然后进入灵感模式。
-     *   - 灵感目标文件夹未配置：双击识别为单击，仅执行一次普通分段，不进入灵感模式。
+     * - 灵感模式：单击立即保存灵感录音到灵感目标知识库并回到普通模式。
+     * - 普通模式：执行一次普通分段（截断保存当前段），然后进入灵感模式。
+     *   反馈行显示"灵感开始记录，锁屏/再次点击将存入 xx"。
      *
+     * 未配置灵感文件夹时按钮在通知层已禁用，不会进入此方法。
      * 仅在 Recording 阶段有效；Paused / Monitoring / Idle 忽略。
      */
     fun manualSegment() {
         if (phase != Phase.Recording) return
-
-        // 灵感模式：任何点击立即保存灵感录音并回到普通模式
         if (inspirationMode) {
             saveInspirationSegment()
-            return
-        }
-
-        // 普通模式：双击检测
-        if (segmentClickJob?.isActive == true) {
-            // 第二次点击（1 秒内）= 双击
-            segmentClickJob?.cancel()
-            segmentClickJob = null
-            val config = imaSettings.config.value
-            if (config.inspirationFolderId.isNotBlank()) {
-                // 已配置灵感文件夹：执行一次普通分段 + 进入灵感模式
-                performManualSegment()
-                enterInspirationMode()
-            } else {
-                // 未配置灵感文件夹：双击识别为单击，仅执行一次普通分段
-                performManualSegment()
-            }
         } else {
-            // 第一次点击：启动 1 秒延迟计时，到点无第二次点击则执行普通分段
-            segmentClickJob = scope.launch {
-                delay(DOUBLE_CLICK_WINDOW_MS)
-                segmentClickJob = null
-                // 延迟期间状态可能变化（暂停/停止/分组/自动分段），防御性检查避免在不当时机分段
-                if (phase != Phase.Recording) return@launch
-                performManualSegment()
-            }
+            performManualSegment()
+            enterInspirationMode()
         }
     }
 
     /**
-     * 执行一次普通手动分段（落盘当前段 + 开新段 + 5 秒反馈行），与双击检测无关。
+     * 执行一次普通手动分段（落盘当前段 + 开新段 + 5 秒反馈行）。
      * 取消分组/分段/暂停可能挂起的任务，避免与本次分段冲突。
      */
     private fun performManualSegment() {
@@ -471,8 +433,6 @@ class SegmentController(
         val folderName = config.inspirationFolderName.ifBlank { inspirationFolderId }
 
         // 取消可能挂起的任务
-        segmentClickJob?.cancel()
-        segmentClickJob = null
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
         kbSwitchJob?.cancel()
@@ -573,9 +533,6 @@ class SegmentController(
         if (phase != Phase.Recording) return
         val folders = imaSettings.config.value.activeFolders
         if (folders.size < 2) return
-        // 分组按钮接管，取消分段按钮可能挂起的双击检测
-        segmentClickJob?.cancel()
-        segmentClickJob = null
         val currentId = imaSettings.config.value.currentFolderId
         val currentIndex = folders.indexOfFirst { it.id == currentId }
         val nextIndex = if (currentIndex < 0) 0 else (currentIndex + 1) % folders.size
@@ -684,8 +641,6 @@ class SegmentController(
      * 用于 [forceSegmentByGeoTrigger] 开始前清理状态。
      */
     private fun cancelPendingSegmentJobsForGeo() {
-        segmentClickJob?.cancel()
-        segmentClickJob = null
         kbSwitchJob?.cancel()
         kbSwitchJob = null
         segmentFeedbackJob?.cancel()
@@ -706,8 +661,6 @@ class SegmentController(
         kbSwitchJob = null
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
-        segmentClickJob?.cancel()
-        segmentClickJob = null
         pauseSelectJob?.cancel()
         pauseSelectJob = null
         pauseTimerJob?.cancel()
@@ -1097,10 +1050,8 @@ class SegmentController(
         private const val STOP_CHECK_INTERVAL_MS = 30_000L
         /** 分组按钮点击后等待再次点击的窗口期，期间无新点击则自动执行分段。 */
         private const val KB_SWITCH_DELAY_MS = 5_000L
-        /** 分段按钮点击后反馈行显示时长，到时自动清除。 */
+        /** 灵感按钮点击后反馈行显示时长，到时自动清除。 */
         private const val SEGMENT_FEEDBACK_DURATION_MS = 5_000L
-        /** 分段按钮双击检测窗口：第一次点击后在此时间内有第二次点击则判定为双击。 */
-        private const val DOUBLE_CLICK_WINDOW_MS = 1_000L
         /** 暂停按钮点击后的选择窗口期，期间无新点击则按当前档位进入暂停。 */
         private const val PAUSE_SELECT_WINDOW_MS = 5_000L
         /** 定时暂停的倒计时轮询间隔（1 分钟），到 0 自动恢复录音。 */
