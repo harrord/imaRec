@@ -124,6 +124,23 @@ class CalendarScanService : Service() {
             return
         }
 
+        // 基线快照：用户首次开启闪念胶囊时，把当时所有未来 7 天内的事件全部记入
+        // processedEventIds（不区分锚点小时），防止历史日程被误上传。
+        // 之后只有快照后新创建的事件才会被处理。一旦完成永远不再重复。
+        if (!config.baselineSnapshotDone) {
+            Log.d(TAG, "scanOnce: doing baseline snapshot (first time enabled)")
+            val baselineEvents = CalendarReader.queryUpcomingEvents(this)
+            settings.markEventsProcessed(baselineEvents.map { it.id })
+            settings.markBaselineDone()
+            Log.d(
+                TAG,
+                "baseline snapshot done: marked ${baselineEvents.size} existing events as processed, " +
+                    "will only process newly created events from now on"
+            )
+            updateNotification()
+            return // 基线快照本轮不处理任何事件，下一轮扫描开始正常处理
+        }
+
         Log.d(
             TAG,
             "scanOnce: start, anchorHour=${config.anchorHour} interval=${config.scanIntervalMinutes}min " +

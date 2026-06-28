@@ -26,6 +26,12 @@ data class CalendarCapsuleConfig(
     val anchorHour: Int = 3,
     val scanIntervalMinutes: Int = 3,
     val processedEventIds: Map<String, Long> = emptyMap(),
+    /**
+     * 基线快照是否已完成。用户首次开启闪念胶囊时，把当时所有未来 7 天内的事件
+     * 全部记入 processedEventIds（不区分锚点小时），防止历史日程被误上传。
+     * 之后只有快照后新创建的事件才会被处理。一旦 true 永远 true。
+     */
+    val baselineSnapshotDone: Boolean = false,
 )
 
 /**
@@ -71,17 +77,37 @@ class CalendarCapsuleSettings private constructor(context: Context) {
     }
 
     /**
-     * 标记事件已处理，写入时自动清理 1 天前的条目防止膨胀。
+     * 标记事件已处理，写入时自动清理 7 天前的条目防止膨胀（与查询窗口对齐）。
      * 笔记创建失败不调用此方法，下次扫描会重试。
      */
     fun markEventProcessed(eventId: String) {
         update { cfg ->
             val now = System.currentTimeMillis()
-            val dayAgo = now - DAY_MS
-            // 清理 1 天前的条目
-            val cleaned = cfg.processedEventIds.filter { it.value >= dayAgo }
+            val weekAgo = now - SEVEN_DAYS_MS
+            // 清理 7 天前的条目（与查询窗口对齐，保证基线快照事件不被过早清理）
+            val cleaned = cfg.processedEventIds.filter { it.value >= weekAgo }
             cfg.copy(processedEventIds = cleaned + (eventId to now))
         }
+    }
+
+    /**
+     * 批量标记事件已处理（用于基线快照），一次 update 完成，避免多次写 SharedPreferences。
+     * 清理规则与 [markEventProcessed] 一致。
+     */
+    fun markEventsProcessed(eventIds: List<String>) {
+        if (eventIds.isEmpty()) return
+        update { cfg ->
+            val now = System.currentTimeMillis()
+            val weekAgo = now - SEVEN_DAYS_MS
+            val cleaned = cfg.processedEventIds.filter { it.value >= weekAgo }
+            val added = eventIds.associateWith { now }
+            cfg.copy(processedEventIds = cleaned + added)
+        }
+    }
+
+    /** 标记基线快照已完成（用户首次开启闪念胶囊后调用，一旦 true 永远 true）。 */
+    fun markBaselineDone() {
+        update { it.copy(baselineSnapshotDone = true) }
     }
 
     private fun load(): CalendarCapsuleConfig = CalendarCapsuleConfig(
@@ -91,6 +117,7 @@ class CalendarCapsuleSettings private constructor(context: Context) {
         anchorHour = prefs.getInt(KEY_ANCHOR_HOUR, 3).coerceIn(0, 23),
         scanIntervalMinutes = prefs.getInt(KEY_SCAN_INTERVAL, 3).coerceIn(1, 5),
         processedEventIds = readProcessedMap(prefs.getString(KEY_PROCESSED, null)),
+        baselineSnapshotDone = prefs.getBoolean(KEY_BASELINE_DONE, false),
     )
 
     private fun save(config: CalendarCapsuleConfig) {
@@ -101,6 +128,7 @@ class CalendarCapsuleSettings private constructor(context: Context) {
             putInt(KEY_ANCHOR_HOUR, config.anchorHour.coerceIn(0, 23))
             putInt(KEY_SCAN_INTERVAL, config.scanIntervalMinutes.coerceIn(1, 5))
             putString(KEY_PROCESSED, writeProcessedMap(config.processedEventIds))
+            putBoolean(KEY_BASELINE_DONE, config.baselineSnapshotDone)
             apply()
         }
     }
@@ -125,7 +153,7 @@ class CalendarCapsuleSettings private constructor(context: Context) {
 
     companion object {
         private const val TAG = "CalendarCapsuleSettings"
-        private const val DAY_MS = 24L * 60 * 60 * 1000
+        private const val SEVEN_DAYS_MS = 7L * 24 * 60 * 60 * 1000
 
         @Volatile
         private var instance: CalendarCapsuleSettings? = null
@@ -142,5 +170,6 @@ class CalendarCapsuleSettings private constructor(context: Context) {
         private const val KEY_ANCHOR_HOUR = "anchor_hour"
         private const val KEY_SCAN_INTERVAL = "scan_interval_minutes"
         private const val KEY_PROCESSED = "processed_event_ids"
+        private const val KEY_BASELINE_DONE = "baseline_snapshot_done"
     }
 }
