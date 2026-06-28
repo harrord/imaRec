@@ -6,7 +6,6 @@ import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,8 +19,11 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -50,23 +52,25 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TimePicker
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
-import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -602,32 +606,171 @@ private fun StopAtSection(
     }
 
     if (showPicker) {
-        val state = rememberTimePickerState(
+        ListTimePickerDialog(
             initialHour = hour,
             initialMinute = minute,
-            is24Hour = true,
+            onConfirm = { h, m ->
+                onTimeSelected(h, m)
+                showPicker = false
+            },
+            onDismiss = { showPicker = false },
         )
-        AlertDialog(
-            onDismissRequest = { showPicker = false },
-            title = { Text("选择停止时间") },
-            text = {
-                androidx.compose.foundation.layout.Box(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    TimePicker(state = state)
+    }
+}
+
+@Composable
+private fun ListTimePickerDialog(
+    initialHour: Int,
+    initialMinute: Int,
+    onConfirm: (Int, Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    // 列表项高度与列表总高度固定，确保首尾项也能滚动到正中央
+    val itemHeight = 48.dp
+    val listHeight = 240.dp
+    val halfPadding = (listHeight - itemHeight) / 2
+
+    val hourListState = rememberLazyListState()
+    val minuteListState = rememberLazyListState()
+
+    // 初始滚动使初始值居中
+    LaunchedEffect(Unit) {
+        hourListState.scrollToItem(initialHour)
+        minuteListState.scrollToItem(initialMinute)
+    }
+
+    // 计算可视区域正中央的那一项（小时）
+    val centeredHour by remember {
+        derivedStateOf {
+            centeredIndex(hourListState, fallback = initialHour)
+        }
+    }
+    // 计算可视区域正中央的那一项（分钟）
+    val centeredMinute by remember {
+        derivedStateOf {
+            centeredIndex(minuteListState, fallback = initialMinute)
+        }
+    }
+
+    // 滚动停止后吸附到最近的项，保证某一项正好落在正中央
+    LaunchedEffect(hourListState) {
+        snapshotFlow { hourListState.isScrollInProgress }
+            .collect { scrolling ->
+                if (!scrolling) {
+                    hourListState.animateScrollToItem(centeredHour)
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    onTimeSelected(state.hour, state.minute)
-                    showPicker = false
-                }) { Text("确定") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showPicker = false }) { Text("取消") }
-            },
-        )
+            }
+    }
+    LaunchedEffect(minuteListState) {
+        snapshotFlow { minuteListState.isScrollInProgress }
+            .collect { scrolling ->
+                if (!scrolling) {
+                    minuteListState.animateScrollToItem(centeredMinute)
+                }
+            }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择停止时间") },
+        text = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // 小时列
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "时",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    WheelColumn(
+                        listState = hourListState,
+                        values = (0..23).toList(),
+                        centeredValue = centeredHour,
+                        itemHeight = itemHeight,
+                        listHeight = listHeight,
+                        halfPadding = halfPadding,
+                    )
+                }
+                Text(
+                    text = ":",
+                    style = MaterialTheme.typography.headlineMedium,
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                )
+                // 分钟列
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "分",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    WheelColumn(
+                        listState = minuteListState,
+                        values = (0..59).toList(),
+                        centeredValue = centeredMinute,
+                        itemHeight = itemHeight,
+                        listHeight = listHeight,
+                        halfPadding = halfPadding,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(centeredHour, centeredMinute) }) { Text("确定") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+/** 计算当前位于可视区域正中央的项 index */
+private fun centeredIndex(listState: androidx.compose.foundation.lazy.LazyListState, fallback: Int): Int {
+    val layoutInfo = listState.layoutInfo
+    val viewportCenter = (layoutInfo.viewportStartOffset + layoutInfo.viewportEndOffset) / 2
+    return layoutInfo.visibleItemsInfo.minByOrNull { item ->
+        val itemCenter = item.offset + item.size / 2
+        kotlin.math.abs(itemCenter - viewportCenter)
+    }?.index ?: fallback
+}
+
+@Composable
+private fun WheelColumn(
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    values: List<Int>,
+    centeredValue: Int,
+    itemHeight: androidx.compose.ui.unit.Dp,
+    listHeight: androidx.compose.ui.unit.Dp,
+    halfPadding: androidx.compose.ui.unit.Dp,
+) {
+    LazyColumn(
+        state = listState,
+        modifier = Modifier
+            .width(72.dp)
+            .height(listHeight),
+        contentPadding = PaddingValues(vertical = halfPadding),
+    ) {
+        items(values) { value ->
+            val selected = value == centeredValue
+            Text(
+                text = String.format(Locale.getDefault(), "%02d", value),
+                style = if (selected) MaterialTheme.typography.titleLarge
+                    else MaterialTheme.typography.bodyLarge,
+                color = if (selected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(itemHeight)
+                    .wrapContentHeight(Alignment.CenterVertically),
+            )
+        }
     }
 }
 
