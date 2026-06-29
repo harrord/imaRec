@@ -107,6 +107,18 @@ class SegmentController(
     /** 定时暂停的每分钟递减任务，到 0 后自动恢复录音。 */
     private var pauseTimerJob: Job? = null
 
+    /**
+     * 暂停态下的步数监测任务（"移动时继续"核心）。
+     *
+     * 进入手动暂停态（PausedForever / PausedTimed）时启动，定时检测步数累计变化，
+     * 达 [SegmentConfig.stepStartThreshold] 时自动调用 [resumeRecording] 恢复录音。
+     * 离开暂停态（恢复录音、停止会话、地理触发开新段、进入灵感）时取消。
+     */
+    private var pauseStepCheckJob: Job? = null
+
+    /** 进入暂停态时的基准步数，用于计算间隔期内的步数变化。 */
+    private var pauseStepBaseline = -1L
+
     /** 暂停选择窗口内的累计点击次数，用于 4 档循环映射。 */
     private var pauseSelectCount = 0
 
@@ -344,6 +356,8 @@ class SegmentController(
                     releaseWakeLock()
                     startPauseCountdown(file)
                 }
+                // 进入暂停态后启动"移动时继续"步数监测
+                startPauseStepCheck()
             } catch (e: RuntimeException) {
                 Log.e(TAG, "pause failed", e)
             }
@@ -373,6 +387,45 @@ class SegmentController(
     }
 
     /**
+     * 启动"移动时继续"步数监测：仅在 [stepResumeEnabled] 开启且处于手动暂停态时生效。
+     *
+     * 以当前累计步数为基准，每隔 [PAUSE_STEP_CHECK_INTERVAL_MS] 检查一次，
+     * 步数累计变化达 [SegmentConfig.stepStartThreshold] 时自动调用 [resumeRecording]
+     * 恢复录音。传感器不可用（currentSteps < 0）时不启动。
+     *
+     * 幂等：重复调用会先取消已有任务再重启。
+     */
+    private fun startPauseStepCheck() {
+        if (!stepResumeEnabled) return
+        stopPauseStepCheck()
+        val baseline = stepProvider.currentSteps()
+        if (baseline < 0) return // 传感器不可用或尚未收到数据
+        pauseStepBaseline = baseline
+        pauseStepCheckJob = scope.launch {
+            while (isActive && (phase == Phase.PausedForever || phase == Phase.PausedTimed)) {
+                delay(PAUSE_STEP_CHECK_INTERVAL_MS)
+                if (phase != Phase.PausedForever && phase != Phase.PausedTimed) return@launch
+                val current = stepProvider.currentSteps()
+                if (current < 0) continue
+                val threshold = settings.config.value.stepStartThreshold
+                if (current - pauseStepBaseline >= threshold) {
+                    // 步数变化达阈值，自动恢复录音
+                    val file = currentFile ?: lastPausedFile ?: return@launch
+                    resumeRecording(file)
+                    return@launch
+                }
+            }
+        }
+    }
+
+    /** 取消"移动时继续"步数监测任务。幂等。 */
+    private fun stopPauseStepCheck() {
+        pauseStepCheckJob?.cancel()
+        pauseStepCheckJob = null
+        pauseStepBaseline = -1L
+    }
+
+    /**
      * 恢复录音：取消定时暂停倒计时与选择窗口，recorder.resume()，回到 Recording。
      * 用于用户点继续（PausedForever/PausedTimed）或定时暂停到 0 自动恢复。
      *
@@ -387,6 +440,8 @@ class SegmentController(
         pauseSelectJob = null
         pauseTimerJob?.cancel()
         pauseTimerJob = null
+        // 离开暂停态，取消"移动时继续"步数监测
+        stopPauseStepCheck()
         pauseGroupSegmentDone = false
         PauseGroupSegmentStore.update(false)
         val recorder = mediaRecorder
@@ -570,9 +625,10 @@ class SegmentController(
         }
         // 1. 落盘当前段（归当前分组，不开新段）
         manualSegmentInternal(retagFolderId = null, startNew = false)
-        // 2. 取消定时暂停倒计时（保留数值），取消分组倒计时
+        // 2. 取消定时暂停倒计时（保留数值），取消分组倒计时，取消"移动时继续"步数监测
         pauseTimerJob?.cancel()
         pauseTimerJob = null
+        stopPauseStepCheck()
         kbSwitchJob?.cancel()
         kbSwitchJob = null
         GroupCountdownStore.update(false)
@@ -641,6 +697,9 @@ class SegmentController(
                 }
             }
         }
+        // 回到暂停态后重启"移动时继续"步数监测
+        // （若 Timed 分支剩余 0 已调 resumeRecording 离开暂停态，startPauseStepCheck 内部 while 会立即退出，无害）
+        startPauseStepCheck()
 
         // 显示保存结果反馈，5 秒后清除
         onGroupFeedback?.invoke("灵感已保存到「$folderName」")
@@ -886,6 +945,7 @@ class SegmentController(
         pauseSelectJob = null
         pauseTimerJob?.cancel()
         pauseTimerJob = null
+        stopPauseStepCheck()
         pauseGroupSegmentDone = false
         PauseGroupSegmentStore.update(false)
     }
@@ -905,6 +965,7 @@ class SegmentController(
         pauseSelectJob = null
         pauseTimerJob?.cancel()
         pauseTimerJob = null
+        stopPauseStepCheck()
         audioMonitor?.stop()
         audioMonitor = null
 
@@ -1234,6 +1295,8 @@ class SegmentController(
             )
         }
         // 开始条件（移动时继续）：仅在 stepStartEnabled 开启时注册
+        // 注意：此条件作用于"间隔期"（Monitoring）。用户手动暂停态下的自动恢复
+        // 由 [pauseStepCheckJob] 单独处理，不走引擎。
         val startConditions = mutableListOf<SegmentStartCondition>()
         if (config.stepStartEnabled) {
             startConditions += StepCountStartCondition(
@@ -1316,6 +1379,8 @@ class SegmentController(
         private const val PAUSE_SELECT_WINDOW_MS = 5_000L
         /** 定时暂停的倒计时轮询间隔（1 分钟），到 0 自动恢复录音。 */
         private const val PAUSE_COUNTDOWN_INTERVAL_MS = 60_000L
+        /** "移动时继续"在暂停态下的步数检查轮询间隔（30 秒）。 */
+        private const val PAUSE_STEP_CHECK_INTERVAL_MS = 30_000L
         /** 片段最小上传时长，低于此值的片段保留到本地但不上传。 */
         private const val MIN_SEGMENT_DURATION_MS = 10_000L
         /** 单段文件大小上限（60MB），超过立即分段以降低大文件后台上传的 broken pipe 风险。 */

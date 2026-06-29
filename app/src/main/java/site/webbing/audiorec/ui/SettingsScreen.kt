@@ -287,7 +287,7 @@ fun SettingsScreen(
             // ── 卡片 5：移动时继续 ──
             SettingsCard(
                 title = "移动时继续",
-                description = "进入间隔期后，步数累计变化达阈值时开始新片段。与「安静时暂停」相互独立。",
+                description = "录音暂停后定时检测步数变化，累计达阈值时自动恢复录音。与「安静时暂停」相互独立。",
             ) {
                 StepResumeSection(
                     enabled = segmentConfig.stepStartEnabled,
@@ -556,8 +556,7 @@ private fun SilencePauseSection(
 /**
  * 移动时继续卡片内容：独立开关 + 步数变化阈值。
  *
- * 与「安静时暂停」完全独立：可单独开启，但实际只在录音进入间隔期后才会触发
- * 步数继续条件（间隔期由「安静时暂停」产生）。
+ * 录音暂停后定时检测步数累计变化，达阈值时自动恢复录音。与「安静时暂停」完全独立。
  */
 @Composable
 private fun StepResumeSection(
@@ -574,7 +573,7 @@ private fun StepResumeSection(
         Column(modifier = Modifier.padding(end = 16.dp)) {
             Text(text = "启用移动时继续", style = MaterialTheme.typography.bodyLarge)
             Text(
-                text = "间隔期步数变化达阈值后开始新片段",
+                text = "暂停后步数变化达阈值自动恢复录音",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

@@ -12,20 +12,18 @@ import kotlinx.coroutines.flow.asStateFlow
  * 拆分为两个完全独立的开关（卡片化设置）：
  * - [silencePauseEnabled]：安静时暂停开关。分贝低于 [silenceThresholdDb] 持续
  *   [silenceSustainMinutes] 分钟，触发保存+上传并进入间隔期。
- * - [stepStartEnabled]：移动时继续开关。进入间隔期后，步数累计变化达
- *   [stepStartThreshold] 步，开始新片段。与 [silencePauseEnabled] 完全独立。
+ * - [stepStartEnabled]：移动时继续开关。用户手动暂停录音后，定时检测步数累计变化，
+ *   达 [stepStartThreshold] 步时自动恢复录音。与 [silencePauseEnabled] 完全独立。
  *
  * 两个开关相互独立：可以只开其中一个，也可以两个都开或都关。
- * 注意：若只开 [stepStartEnabled] 而不开 [silencePauseEnabled]，录音不会进入
- * 间隔期，步数继续条件实际不会触发——这是用户明确选择的方案 A（完全独立）。
  *
  * 新增条件时，在此 data class 加对应参数，并在 load/save 补键。
  *
  * @param silencePauseEnabled 是否开启"安静时暂停"（安静切片结束条件）
  * @param silenceThresholdDb 安静阈值（近似 dB SPL 正值），低于此值视为安静
  * @param silenceSustainMinutes 安静需持续的分钟数，达到后触发切片
- * @param stepStartEnabled 是否开启"移动时继续"（步数变化开始条件）
- * @param stepStartThreshold 步数变化阈值，累计达此值后开始新片段
+ * @param stepStartEnabled 是否开启"移动时继续"（暂停态下步数变化自动恢复录音）
+ * @param stepStartThreshold 步数变化阈值，暂停态下累计达此值后自动恢复录音
  * @param dbCalibrationOffset dBFS → dB SPL 的校准偏移量，默认 90
  * @param stopAtEnabled 是否启用定时停止：到达设定的时刻自动结束录音会话
  * @param stopAtHour 定时停止的小时（0~23）
