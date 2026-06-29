@@ -16,9 +16,11 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import site.webbing.audiorec.FolderOption
+import site.webbing.audiorec.GroupCountdownStore
 import site.webbing.audiorec.ImaSettings
 import site.webbing.audiorec.ImaUploader
 import site.webbing.audiorec.InspirationModeStore
+import site.webbing.audiorec.PauseGroupSegmentStore
 import site.webbing.audiorec.RecordingFileManager
 import site.webbing.audiorec.RecordingService
 import site.webbing.audiorec.RecordingStatus
@@ -112,6 +114,27 @@ class SegmentController(
     private var pauseRemainingMinutes = 0
 
     /**
+     * 暂停态分组按钮是否已执行过分段（方案 B）。
+     *
+     * - 进入暂停态时重置为 false，分组按钮可点击
+     * - 暂停态点分组按钮启动 5 秒倒计时，到点执行分段后置 true，分组按钮变灰
+     * - 进入 PausedInspiration 时也置 true（灵感期间分组按钮禁用）
+     * - resumeRecording() 恢复录音时重置为 false，分组按钮恢复可用
+     *
+     * 由 [RecordingStateStore] 间接暴露给通知层，决定暂停态下分组按钮是否可点击。
+     */
+    private var pauseGroupSegmentDone = false
+
+    /**
+     * 暂停态用于通知展示的占位文件。
+     *
+     * 暂停态下点分组/灵感按钮会释放 recorder（mediaRecorder=null、currentFile=null），
+     * 但 [RecordingStatus.Paused] 仍需一个 file 参数用于通知展示（不参与录音逻辑）。
+     * 进入暂停态时记录当前文件，释放后用此字段占位。
+     */
+    private var lastPausedFile: File? = null
+
+    /**
      * 分组按钮的 5 秒倒计时任务。每次点击分组按钮都会取消上一个并重启，
      * 到点后清除通知反馈行并执行 [manualSegment]（上传当前段 + 开新段）。
      */
@@ -149,6 +172,18 @@ class SegmentController(
          * 按点击次数循环选择暂停模式。窗口结束按所选模式进入 PausedForever / PausedTimed。
          */
         data object PauseSelecting : Phase
+        /**
+         * 暂停态下进入灵感录制：recorder 已创建并 start，正在录制灵感段。
+         * 结束灵感后回到 [origin] 对应的暂停态（定时暂停恢复剩余分钟数倒计时）。
+         * 此状态下 inspirationMode == true，暂停按钮置灰不可点击。
+         */
+        data class PausedInspiration(val origin: PausedOrigin) : Phase
+    }
+
+    /** 暂停态来源，用于 [PausedInspiration] 结束后恢复正确的暂停子态。 */
+    private sealed interface PausedOrigin {
+        data object Forever : PausedOrigin
+        data object Timed : PausedOrigin
     }
 
     private var phase: Phase = Phase.Idle
@@ -207,14 +242,23 @@ class SegmentController(
         // （暂停态下按电源键会破坏暂停语义、对 paused recorder 调 stop() 并开新段）。
         // 所有暂停入口（通知暂停键、MediaSession.onPause、蓝牙耳机按键、锁屏媒体控件）
         // 均走 togglePause()，一处 guard 即可全部堵住。
+        // 覆盖 Phase.PausedInspiration（inspirationMode == true）。
         if (inspirationMode) return
-        val recorder = mediaRecorder ?: return
-        val file = currentFile ?: return
         when (phase) {
-            Phase.Recording -> enterPauseSelecting(file)
-            Phase.PauseSelecting -> cyclePauseSelecting(file)
-            Phase.PausedForever, Phase.PausedTimed -> resumeRecording(file)
-            Phase.Monitoring, Phase.Idle -> Unit
+            Phase.Recording -> {
+                val file = currentFile ?: return
+                enterPauseSelecting(file)
+            }
+            Phase.PauseSelecting -> {
+                val file = currentFile ?: return
+                cyclePauseSelecting(file)
+            }
+            Phase.PausedForever, Phase.PausedTimed -> {
+                // recorder 可能已释放（暂停态点过分组/灵感），用 lastPausedFile 占位
+                val file = currentFile ?: lastPausedFile ?: return
+                scope.launch { resumeRecording(file) }
+            }
+            is Phase.PausedInspiration, Phase.Monitoring, Phase.Idle -> Unit
         }
     }
 
@@ -229,6 +273,7 @@ class SegmentController(
         // 选择窗口期间取消分组/灵感反馈，提示行由暂停选择接管
         kbSwitchJob?.cancel()
         kbSwitchJob = null
+        GroupCountdownStore.update(false)
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
         onPauseFeedback?.invoke("暂停", "5 秒后暂停")
@@ -272,8 +317,14 @@ class SegmentController(
                 samplingJob = null
                 kbSwitchJob?.cancel()
                 kbSwitchJob = null
+                GroupCountdownStore.update(false)
                 segmentFeedbackJob?.cancel()
                 segmentFeedbackJob = null
+                // 记录暂停态占位文件（recorder 后续可能被分组/灵感释放，用此占位展示通知）
+                lastPausedFile = file
+                // 重置分组按钮可用态：进入暂停态时分组按钮可点击
+                pauseGroupSegmentDone = false
+                PauseGroupSegmentStore.update(false)
                 if (mode == 0) {
                     // 一直暂停
                     phase = Phase.PausedForever
@@ -324,47 +375,68 @@ class SegmentController(
     /**
      * 恢复录音：取消定时暂停倒计时与选择窗口，recorder.resume()，回到 Recording。
      * 用于用户点继续（PausedForever/PausedTimed）或定时暂停到 0 自动恢复。
+     *
+     * 两条路径：
+     * - recorder 仍存在（暂停态未点过分组/灵感）：直接 [MediaRecorder.resume]
+     * - recorder 已释放（暂停态点过分组/灵感，mediaRecorder=null）：调 [startNewSegment] 创建新段
+     *
+     * 恢复时重置 [pauseGroupSegmentDone]=false，分组按钮恢复可用。
      */
-    private fun resumeRecording(file: File) {
+    private suspend fun resumeRecording(file: File) {
         pauseSelectJob?.cancel()
         pauseSelectJob = null
         pauseTimerJob?.cancel()
         pauseTimerJob = null
-        val recorder = mediaRecorder ?: return
-        try {
-            recorder.resume()
-            phase = Phase.Recording
-            // 恢复后重置结束条件，避免暂停期间时间跳跃误触发
-            engine?.onSegmentStart()
-            publishStatus(RecordingStatus.Recording(file))
-            acquireWakeLock()
-            startSamplingLoop()
-            // 灵感模式下恢复录音后，通知重建会清除反馈行，重新显示灵感提示
-            if (inspirationMode) {
-                onGroupFeedback?.invoke("灵感开始记录，锁屏/再次点击将存入 ${inspirationFolderName()}")
+        pauseGroupSegmentDone = false
+        PauseGroupSegmentStore.update(false)
+        val recorder = mediaRecorder
+        if (recorder != null) {
+            try {
+                recorder.resume()
+                phase = Phase.Recording
+                // 恢复后重置结束条件，避免暂停期间时间跳跃误触发
+                engine?.onSegmentStart()
+                publishStatus(RecordingStatus.Recording(file))
+                acquireWakeLock()
+                startSamplingLoop()
+                // 灵感模式下恢复录音后，通知重建会清除反馈行，重新显示灵感提示
+                if (inspirationMode) {
+                    onGroupFeedback?.invoke("灵感开始记录，锁屏/再次点击将存入 ${inspirationFolderName()}")
+                }
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "resume failed", e)
             }
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "resume failed", e)
+        } else {
+            // recorder 已释放（暂停态点过分组/灵感）：创建新段
+            startNewSegment(reason = "继续录音")
         }
     }
 
     /**
-     * 灵感按钮单击入口。移除双击检测，单击立即响应：
+     * 灵感按钮单击入口。移除双击检测，单击立即响应。
      *
-     * - 灵感模式：单击立即保存灵感录音到灵感目标知识库并回到普通模式。
-     * - 普通模式：执行一次普通分段（截断保存当前段），然后进入灵感模式。
-     *   反馈行显示"灵感开始记录，锁屏/再次点击将存入 xx"。
+     * 按 phase 分流：
+     * - [Phase.Recording]（普通录音态）：灵感模式单击保存灵感；普通模式执行分段+进入灵感模式
+     * - [Phase.PausedInspiration]：结束灵感录制，保存到灵感文件夹，回到原暂停态（保持暂停）
+     * - [Phase.PausedForever] / [Phase.PausedTimed]：落盘当前段（归当前分组，不开新段），
+     *   创建灵感段并 resume recorder 录制灵感，phase 切到 PausedInspiration，保持暂停语义
+     *   （暂停按钮文案仍为"继续"、置灰不可点击；倒计时暂停保留剩余分钟数）
+     * - [Phase.PauseSelecting] / [Phase.Monitoring] / [Phase.Idle]：忽略
      *
      * 未配置灵感文件夹时按钮在通知层已禁用，不会进入此方法。
-     * 仅在 Recording 阶段有效；Paused / Monitoring / Idle 忽略。
      */
     suspend fun manualSegment() {
-        if (phase != Phase.Recording) return
-        if (inspirationMode) {
-            saveInspirationSegment()
-        } else {
-            performManualSegment()
-            enterInspirationMode()
+        when (phase) {
+            Phase.Recording -> {
+                if (inspirationMode) saveInspirationSegment() else { performManualSegment(); enterInspirationMode() }
+            }
+            is Phase.PausedInspiration -> {
+                savePausedInspirationSegment()
+            }
+            Phase.PausedForever, Phase.PausedTimed -> {
+                enterPausedInspiration()
+            }
+            Phase.PauseSelecting, Phase.Monitoring, Phase.Idle -> return
         }
     }
 
@@ -375,6 +447,7 @@ class SegmentController(
     private suspend fun performManualSegment() {
         kbSwitchJob?.cancel()
         kbSwitchJob = null
+        GroupCountdownStore.update(false)
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
         pauseSelectJob?.cancel()
@@ -414,14 +487,22 @@ class SegmentController(
      * 由 [RecordingService] 收到 ACTION_SCREEN_OFF 广播时调用。仅在当前处于灵感模式时生效，
      * 普通录音模式下忽略（[inspirationMode] == false 直接返回），不影响普通录音。
      *
-     * 内部复用 [saveInspirationSegment] 完成落盘、上传、切回普通模式、开新段继续录音。
+     * 按 phase 分流：
+     * - [Phase.Recording]（普通录音态灵感）：复用 [saveInspirationSegment] 落盘+开新段继续录音
+     * - [Phase.PausedInspiration]（暂停态灵感）：复用 [savePausedInspirationSegment] 落盘+回到暂停态
      *
      * 由于灵感模式已禁用暂停（[togglePause] 开头 guard），inspirationMode == true 时 phase 必然为
-     * Recording，此处无需额外检查 phase。
+     * Recording 或 PausedInspiration。
      */
     fun stopInspirationByScreenOff() {
         if (!inspirationMode) return
-        saveInspirationSegment()
+        scope.launch {
+            when (phase) {
+                is Phase.PausedInspiration -> savePausedInspirationSegment()
+                Phase.Recording -> saveInspirationSegment()
+                else -> Unit
+            }
+        }
     }
 
     /**
@@ -445,6 +526,7 @@ class SegmentController(
         segmentFeedbackJob = null
         kbSwitchJob?.cancel()
         kbSwitchJob = null
+        GroupCountdownStore.update(false)
         pauseSelectJob?.cancel()
         pauseSelectJob = null
 
@@ -456,6 +538,109 @@ class SegmentController(
 
         // 开新段继续录音
         startNewSegment(reason = "灵感保存")
+
+        // 显示保存结果反馈，5 秒后清除
+        onGroupFeedback?.invoke("灵感已保存到「$folderName」")
+        segmentFeedbackJob = scope.launch {
+            delay(SEGMENT_FEEDBACK_DURATION_MS)
+            onGroupFeedback?.invoke(null)
+        }
+    }
+
+    /**
+     * 暂停态进入灵感录制（方案 A：灵感期间 recorder 临时恢复录音）。
+     *
+     * 步骤：
+     * 1. 落盘当前段（归当前选中文件夹，startNew=false 不开新段）—— recorder 被 stop/release/null
+     * 2. 取消定时暂停倒计时（pauseTimerJob），但保留 [pauseRemainingMinutes] 数值供恢复用
+     * 3. 取消暂停态分组按钮可能挂起的 5 秒倒计时（避免与灵感冲突），并置 [pauseGroupSegmentDone]=true
+     *    （灵感期间分组按钮置灰不可点击）
+     * 4. 调 [startNewSegment] 创建新段并 start recorder（用于录灵感）
+     * 5. 覆盖 phase 为 [Phase.PausedInspiration]，记录 origin（Forever/Timed）供结束灵感时恢复
+     * 6. 置 inspirationMode=true，反馈行显示灵感提示
+     *
+     * 此时 recorder 处于活跃录音状态（不是 paused），录到的就是灵感音频。
+     * 用户再次点击灵感按钮时由 [savePausedInspirationSegment] 结束并回到原暂停态。
+     */
+    private suspend fun enterPausedInspiration() {
+        val origin = when (phase) {
+            Phase.PausedForever -> PausedOrigin.Forever
+            Phase.PausedTimed -> PausedOrigin.Timed
+            else -> return
+        }
+        // 1. 落盘当前段（归当前分组，不开新段）
+        manualSegmentInternal(retagFolderId = null, startNew = false)
+        // 2. 取消定时暂停倒计时（保留数值），取消分组倒计时
+        pauseTimerJob?.cancel()
+        pauseTimerJob = null
+        kbSwitchJob?.cancel()
+        kbSwitchJob = null
+        GroupCountdownStore.update(false)
+        pauseGroupSegmentDone = true
+        PauseGroupSegmentStore.update(true)
+        // 3. 创建灵感段（startNewSegment 会 publishStatus(Recording)，需在之后覆盖 phase 与状态）
+        startNewSegment(reason = "暂停灵感")
+        phase = Phase.PausedInspiration(origin)
+        // 4. 进入灵感模式
+        inspirationMode = true
+        InspirationModeStore.update(true)
+        // 5. 重新 publish Paused 状态：通知层据此识别"暂停态灵感"（isPaused && inspirationActive），
+        //    显示继续按钮置灰、灵感按钮呼吸动画。currentFile 是灵感段文件（实际录音中），
+        //    但通知展示用 lastPausedFile 占位（不参与录音逻辑）。
+        //    lastPausedFile 在进入暂停态时一定已赋值（startPauseSelectJob 到点时设置）
+        publishStatus(RecordingStatus.Paused(lastPausedFile!!, remainingMinutes = pauseRemainingMinutes.takeIf { origin == PausedOrigin.Timed }))
+        // 6. 反馈行显示灵感提示
+        onGroupFeedback?.invoke("灵感开始记录，再次点击将存入 ${inspirationFolderName()}")
+    }
+
+    /**
+     * 结束暂停态灵感录制：落盘灵感段（归灵感文件夹，跳过 10 秒限制）+ 释放 recorder +
+     * 回到原暂停态（保持暂停语义，不退出暂停）。
+     *
+     * - [PausedOrigin.Forever]：回到 PausedForever，提示"人生记录已暂停"
+     * - [PausedOrigin.Timed]：回到 PausedTimed，从进入灵感前保留的 [pauseRemainingMinutes] 继续倒计时
+     *
+     * recorder 释放后不再重建（保持暂停），直到用户点"继续"由 [resumeRecording] 创建新段。
+     * 分组按钮仍保持 [pauseGroupSegmentDone]=true（灵感结束后分组按钮仍不可点击），
+     * 直到 resumeRecording 重置。
+     */
+    private suspend fun savePausedInspirationSegment() {
+        val origin = (phase as? Phase.PausedInspiration)?.origin ?: return
+        val config = imaSettings.config.value
+        val inspirationFolderId = config.inspirationFolderId
+        val folderName = config.inspirationFolderName.ifBlank { inspirationFolderId }
+
+        // 取消可能挂起的反馈清除任务
+        segmentFeedbackJob?.cancel()
+        segmentFeedbackJob = null
+
+        // 落盘灵感段（归灵感文件夹，跳过 10 秒限制）
+        finalizeInspirationSegment(inspirationFolderId)
+        imaSettings.addFolder(FolderOption(id = inspirationFolderId, name = folderName))
+
+        // 退出灵感模式
+        inspirationMode = false
+        InspirationModeStore.update(false)
+
+        // 恢复原暂停态
+        // lastPausedFile 在进入暂停态时一定已赋值，此处非空
+        val pausedFile = lastPausedFile!!
+        when (origin) {
+            PausedOrigin.Forever -> {
+                phase = Phase.PausedForever
+                publishStatus(RecordingStatus.Paused(pausedFile, remainingMinutes = null))
+            }
+            PausedOrigin.Timed -> {
+                phase = Phase.PausedTimed
+                publishStatus(RecordingStatus.Paused(pausedFile, remainingMinutes = pauseRemainingMinutes))
+                if (pauseRemainingMinutes > 0) {
+                    startPauseCountdown(pausedFile)
+                } else {
+                    // 剩余分钟数为 0（理论不会发生，防御性处理）：直接恢复录音
+                    resumeRecording(pausedFile)
+                }
+            }
+        }
 
         // 显示保存结果反馈，5 秒后清除
         onGroupFeedback?.invoke("灵感已保存到「$folderName」")
@@ -499,17 +684,22 @@ class SegmentController(
     }
 
     /**
-     * 分段的实际执行体：落盘当前段 + 开新段。
+     * 分段的实际执行体：落盘当前段，可选开新段。
      *
      * @param retagFolderId 非空时，把当前段文件名中的文件夹 ID 重写为此值后再上传。
      *                      仅分组按钮 5 秒倒计时到点这条路径传入（切到新文件夹后，让当前段归到新文件夹）；
      *                      其他路径传 null，文件名保持创建时的文件夹不变。
+     * @param startNew true（默认）落盘后开新段继续录音；false 仅落盘上传不开新段，
+     *                 用于暂停态分组按钮到点——保持暂停状态，recorder 释放后不再重建，
+     *                 直到用户点"继续"由 [resumeRecording] 创建新段。
      */
-    private suspend fun manualSegmentInternal(retagFolderId: String?) {
+    private suspend fun manualSegmentInternal(retagFolderId: String?, startNew: Boolean = true) {
         samplingJob?.cancel()
         samplingJob = null
         finalizeAndUploadCurrent(retagFolderId)
-        startNewSegment(reason = "手动分段")
+        if (startNew) {
+            startNewSegment(reason = "手动分段")
+        }
     }
 
     /**
@@ -532,13 +722,25 @@ class SegmentController(
      * - 每次点击都弹 Toast 提示当前选中文件夹与 5 秒后自动分段
      * - 在通知按钮行下方临时显示反馈行（锁屏可见，弥补 Toast 在锁屏可能不弹的限制）
      * - 5 秒内再次点击：取消上一个倒计时、切换到下一个文件夹、重启倒计时
-     * - 5 秒内无再点击：清除反馈行并执行分段（上传当前段 + 用新文件夹开新段）；
+     * - 5 秒内无再点击：清除反馈行并执行分段；
+     *   录音态：上传当前段 + 用新文件夹开新段（startNew=true）
+     *   暂停态：仅上传当前段不开新段（startNew=false），recorder 释放后分组按钮变灰，
+     *   暂停状态保持，直到用户点"继续"
      *   到点时把当前段文件名重打为切换后的新文件夹，使落盘归属与上传目标一致
      *
-     * 仅在 Recording 阶段且 activeFolders ≥ 2 时有效；其他态或无可切换文件夹时忽略。
+     * 仅在 Recording / PausedForever / PausedTimed 阶段且 activeFolders ≥ 2 时有效。
+     * 暂停态下若 [pauseGroupSegmentDone] 已为 true（已用过分组按钮），则忽略点击。
+     * PauseSelecting / PausedInspiration / Monitoring / Idle 态忽略。
      */
     fun switchFolder() {
-        if (phase != Phase.Recording) return
+        when (phase) {
+            Phase.Recording -> Unit
+            Phase.PausedForever, Phase.PausedTimed -> {
+                // 暂停态：分组按钮已用过则忽略
+                if (pauseGroupSegmentDone) return
+            }
+            else -> return
+        }
         val folders = imaSettings.config.value.activeFolders
         if (folders.size < 2) return
         val currentId = imaSettings.config.value.currentFolderId
@@ -559,15 +761,30 @@ class SegmentController(
         // 分组按钮接管反馈行，取消分段按钮可能挂起的反馈清除任务
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
+        GroupCountdownStore.update(true)
+        val startNewOnTimeout = phase == Phase.Recording
         kbSwitchJob = scope.launch {
-            delay(KB_SWITCH_DELAY_MS)
-            onGroupFeedback?.invoke(null)
-            // 倒计时期间状态可能变化（暂停/停止会取消本协程，这里只是防御性检查）
-            if (phase != Phase.Recording) return@launch
-            // 把当前段（在旧文件夹下开始录的）重打为切换后的新文件夹，
-            // 使落盘文件名标签与上传目标、本地列表归属一致
-            val newFolderId = imaSettings.config.value.currentFolderId
-            manualSegmentInternal(retagFolderId = newFolderId)
+            try {
+                delay(KB_SWITCH_DELAY_MS)
+                onGroupFeedback?.invoke(null)
+                GroupCountdownStore.update(false)
+                // 倒计时期间状态可能变化（停止会取消本协程，这里只是防御性检查）
+                if (phase != Phase.Recording && phase != Phase.PausedForever && phase != Phase.PausedTimed) return@launch
+                // 把当前段（在旧文件夹下开始录的）重打为切换后的新文件夹，
+                // 使落盘文件名标签与上传目标、本地列表归属一致
+                val newFolderId = imaSettings.config.value.currentFolderId
+                manualSegmentInternal(retagFolderId = newFolderId, startNew = startNewOnTimeout)
+                // 暂停态到点后：分组按钮变灰（pauseGroupSegmentDone=true），通知重建
+                if (!startNewOnTimeout) {
+                    pauseGroupSegmentDone = true
+                PauseGroupSegmentStore.update(true)
+                publishStatus(RecordingStatus.Paused(lastPausedFile!!, remainingMinutes = pauseRemainingMinutes.takeIf { phase == Phase.PausedTimed }))
+                }
+            } catch (e: CancellationException) {
+                // 倒计时被取消（暂停/停止/灵感等打断）：重置分组倒计时状态
+                GroupCountdownStore.update(false)
+                throw e
+            }
         }
     }
 
@@ -623,6 +840,17 @@ class SegmentController(
                 }
                 startNewSegment(reason = "地理触发")
             }
+            is Phase.PausedInspiration -> {
+                // 暂停态灵感录制中：落盘灵感段（归灵感文件夹）+ 退出灵感模式 + 开新段带 label
+                samplingJob?.cancel()
+                samplingJob = null
+                finalizeAndUploadCurrent()
+                inspirationMode = false
+                InspirationModeStore.update(false)
+                pauseGroupSegmentDone = false
+                PauseGroupSegmentStore.update(false)
+                startNewSegment(reason = "地理触发")
+            }
             Phase.Monitoring -> {
                 // 间隔期：停止监测，开新段带 label
                 audioMonitor?.stop()
@@ -651,12 +879,15 @@ class SegmentController(
     private fun cancelPendingSegmentJobsForGeo() {
         kbSwitchJob?.cancel()
         kbSwitchJob = null
+        GroupCountdownStore.update(false)
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
         pauseSelectJob?.cancel()
         pauseSelectJob = null
         pauseTimerJob?.cancel()
         pauseTimerJob = null
+        pauseGroupSegmentDone = false
+        PauseGroupSegmentStore.update(false)
     }
 
     /** 结束整个会话：落盘当前片段并上传，释放所有资源。 */
@@ -667,6 +898,7 @@ class SegmentController(
         stopTimerJob = null
         kbSwitchJob?.cancel()
         kbSwitchJob = null
+        GroupCountdownStore.update(false)
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
         pauseSelectJob?.cancel()
@@ -677,7 +909,8 @@ class SegmentController(
         audioMonitor = null
 
         when (phase) {
-            Phase.Recording, Phase.PausedForever, Phase.PausedTimed, Phase.PauseSelecting ->
+            Phase.Recording, Phase.PausedForever, Phase.PausedTimed, Phase.PauseSelecting,
+            is Phase.PausedInspiration ->
                 finalizeAndUploadCurrent()
             Phase.Monitoring -> Unit // 间隔期无文件，无需上传
             Phase.Idle -> Unit
@@ -686,6 +919,10 @@ class SegmentController(
         // 落盘完成后才重置灵感模式状态，确保最后一段按灵感模式归到灵感 KB
         inspirationMode = false
         InspirationModeStore.reset()
+        pauseGroupSegmentDone = false
+        PauseGroupSegmentStore.reset()
+        GroupCountdownStore.reset()
+        lastPausedFile = null
         stepProvider.stop()
         releaseWakeLock()
         phase = Phase.Idle
@@ -749,6 +986,7 @@ class SegmentController(
         // 自动分段进入间隔期时，取消分组按钮可能挂起的 5 秒倒计时，避免与间隔期逻辑冲突
         kbSwitchJob?.cancel()
         kbSwitchJob = null
+        GroupCountdownStore.update(false)
         // 间隔期通知不再使用卡片反馈行，取消分段按钮可能挂起的反馈清除任务
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null

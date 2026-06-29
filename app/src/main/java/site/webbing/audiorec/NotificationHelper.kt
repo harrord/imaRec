@@ -193,26 +193,38 @@ class NotificationHelper(private val context: Context) {
         if (status !is RecordingStatus.Recording && status !is RecordingStatus.Paused) return
         val isPaused = status is RecordingStatus.Paused
         val views = RemoteViews(context.packageName, R.layout.notification_recording).apply {
-            val groupEnabled = !isPaused && imaSettings.config.value.activeFolders.size >= 2
             val inspirationActive = InspirationModeStore.active.value
             val inspirationConfigured = imaSettings.config.value.inspirationFolderId.isNotBlank()
-            // 灵感模式下按钮文案保持"灵感.."，普通态显示"灵感"
+            val pauseGroupDone = PauseGroupSegmentStore.done.value
+            val groupCountdownActive = GroupCountdownStore.active.value
+            val foldersCount = imaSettings.config.value.activeFolders.size
+            val inPausedInspiration = isPaused && inspirationActive
+            val inPauseSelecting = !isPaused && toggleText == "暂停"
+            // 分组按钮：暂停选择窗口/灵感模式 禁用；暂停态分组已用禁用；其他同 buildCardViews
+            val groupEnabled = !inspirationActive && !inPauseSelecting && foldersCount >= 2 &&
+                (!isPaused || !pauseGroupDone)
+            // 灵感按钮：灵感态可点击；暂停选择窗口禁用；分组倒计时中禁用；暂停态分组已用禁用
+            val segmentClickable = inspirationActive ||
+                (!isPaused && !inPauseSelecting && inspirationConfigured && !groupCountdownActive) ||
+                (isPaused && !inPausedInspiration && !pauseGroupDone && inspirationConfigured && !groupCountdownActive)
             val segmentText = if (inspirationActive) "灵感.." else "灵感"
             setTextViewText(R.id.segment_button, segmentText)
             setTextViewText(R.id.toggle_button, toggleText)
             setInt(
                 R.id.toggle_button,
                 "setBackgroundResource",
-                if (isPaused) R.drawable.btn_toggle_paused else R.drawable.btn_toggle_recording,
+                when {
+                    inPausedInspiration -> R.drawable.btn_toggle_disabled
+                    isPaused -> R.drawable.btn_toggle_paused
+                    else -> R.drawable.btn_toggle_recording
+                },
             )
-            // 灵感按钮背景：暂停态/未配置置灰，灵感态呼吸动画，普通录音态绿色
             setInt(
                 R.id.segment_button,
                 "setBackgroundResource",
                 when {
-                    isPaused -> R.drawable.btn_segment_disabled
                     inspirationActive -> R.drawable.btn_segment_inspiration
-                    !inspirationConfigured -> R.drawable.btn_segment_disabled
+                    !segmentClickable -> R.drawable.btn_segment_disabled
                     else -> R.drawable.btn_segment_recording
                 },
             )
@@ -221,23 +233,22 @@ class NotificationHelper(private val context: Context) {
                 "setBackgroundResource",
                 if (groupEnabled) R.drawable.btn_segment_recording else R.drawable.btn_segment_disabled,
             )
-            // 灵感按钮可点击条件：灵感态（保存灵感）或（普通录音态且已配置且不在暂停选择窗口/暂停态）
-            // 选择窗口与暂停态均禁用分组/灵感点击，避免打断暂停流程
-            val segmentClickable = inspirationActive ||
-                (!isPaused && toggleText != "暂停" && inspirationConfigured)
             if (segmentClickable) {
                 setOnClickPendingIntent(R.id.segment_button, segmentPendingIntent())
             } else {
                 setOnClickPendingIntent(R.id.segment_button, null)
             }
-            if (isPaused || toggleText == "暂停") {
-                setOnClickPendingIntent(R.id.group_button, null)
-            } else if (groupEnabled) {
+            if (groupEnabled) {
                 setOnClickPendingIntent(R.id.group_button, groupPendingIntent())
             } else {
                 setOnClickPendingIntent(R.id.group_button, null)
             }
-            setOnClickPendingIntent(R.id.toggle_button, togglePendingIntent())
+            // 灵感模式下（含暂停态灵感）禁用暂停/继续按钮点击
+            if (inspirationActive) {
+                setOnClickPendingIntent(R.id.toggle_button, null)
+            } else {
+                setOnClickPendingIntent(R.id.toggle_button, togglePendingIntent())
+            }
             setTextViewText(R.id.feedback_text, hintText)
             val isDarkTheme = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
                 Configuration.UI_MODE_NIGHT_YES
@@ -271,22 +282,34 @@ class NotificationHelper(private val context: Context) {
         status: RecordingStatus? = null,
     ): RemoteViews =
         RemoteViews(context.packageName, R.layout.notification_recording).apply {
-            // 分组按钮：仅在录音态且主页 Tab ≥ 2 时可用；暂停态置灰禁用
-            val groupEnabled = !isPaused && imaSettings.config.value.activeFolders.size >= 2
-            // 灵感模式下按钮文案改为"灵感.."，普通态显示"灵感"
             val inspirationActive = InspirationModeStore.active.value
             val inspirationConfigured = imaSettings.config.value.inspirationFolderId.isNotBlank()
+            val pauseGroupDone = PauseGroupSegmentStore.done.value
+            val groupCountdownActive = GroupCountdownStore.active.value
+            val foldersCount = imaSettings.config.value.activeFolders.size
+            // 暂停态灵感录制中（inspirationActive && isPaused）：等同于录音态灵感模式的按钮表现
+            val inPausedInspiration = isPaused && inspirationActive
+
+            // 分组按钮可点击条件：
+            // - 非灵感模式（录音态灵感/暂停态灵感均禁用分组）
+            // - activeFolders >= 2
+            // - 录音态：可点击（分组倒计时中也可点击，用于连续切文件夹）
+            // - 暂停态：分组未用过（!pauseGroupDone）且不在灵感中时可点击
+            val groupEnabled = !inspirationActive && foldersCount >= 2 &&
+                (!isPaused || !pauseGroupDone)
+            // 灵感按钮可点击条件：
+            // - 灵感态（录音态或暂停态）：可点击（保存灵感）
+            // - 普通录音态且已配置灵感文件夹且不在分组倒计时中：可点击（进入灵感）
+            // - 暂停态（非灵感）且已配置灵感文件夹且不在分组倒计时中且分组未用过：可点击（进入暂停灵感）
+            //   分组倒计时期间灵感按钮禁用（互斥）
+            val segmentClickable = inspirationActive ||
+                (!isPaused && inspirationConfigured && !groupCountdownActive) ||
+                (isPaused && !pauseGroupDone && inspirationConfigured && !groupCountdownActive)
+
             val segmentText = if (inspirationActive) "灵感.." else "灵感"
-            // 暂停按钮文本：
-            // - Recording：暂停
-            // - Paused（一直/定时）：继续
-            // 提示行默认文案：
-            // - Recording：人生记录中...
-            // - Paused(remainingMinutes=null)：人生记录已暂停
-            // - Paused(remainingMinutes=N)：暂停剩余 N 分钟（每分钟递减）
             val toggleText = if (isPaused) "继续" else "暂停"
-            // 灵感模式下禁用暂停：按钮置灰显示且不响应点击（isPaused 态优先级更高，保持继续按钮可用）
-            val pauseDisabledByInspiration = inspirationActive && !isPaused
+            // 灵感模式下（含暂停态灵感）禁用暂停/继续按钮
+            val pauseDisabledByInspiration = inspirationActive
             val defaultHint = when {
                 !isPaused -> "人生记录中..."
                 status is RecordingStatus.Paused && status.remainingMinutes != null ->
@@ -295,27 +318,23 @@ class NotificationHelper(private val context: Context) {
             }
             setTextViewText(R.id.segment_button, segmentText)
             setTextViewText(R.id.toggle_button, toggleText)
-            // 暂停态：继续按钮用琥珀色，灵感 + 分组按钮置灰禁用
-            // 录音态：暂停按钮用绿色，灵感 + 分组按钮可用绿色
-            // 灵感模式下灵感按钮用帧动画（呼吸效果），非灵感态用静态绿色
-            // 灵感模式下暂停按钮置灰（btn_toggle_disabled），向用户明确该操作当前不可用
             setInt(
                 R.id.toggle_button,
                 "setBackgroundResource",
                 when {
+                    // 暂停态灵感录制中：继续按钮置灰（不可点击）
+                    inPausedInspiration -> R.drawable.btn_toggle_disabled
                     isPaused -> R.drawable.btn_toggle_paused
                     pauseDisabledByInspiration -> R.drawable.btn_toggle_disabled
                     else -> R.drawable.btn_toggle_recording
                 },
             )
-            // 灵感按钮背景：暂停态/未配置灵感文件夹置灰，灵感态呼吸动画，普通录音态绿色
             setInt(
                 R.id.segment_button,
                 "setBackgroundResource",
                 when {
-                    isPaused -> R.drawable.btn_segment_disabled
                     inspirationActive -> R.drawable.btn_segment_inspiration
-                    !inspirationConfigured -> R.drawable.btn_segment_disabled
+                    !segmentClickable -> R.drawable.btn_segment_disabled
                     else -> R.drawable.btn_segment_recording
                 },
             )
@@ -324,30 +343,22 @@ class NotificationHelper(private val context: Context) {
                 "setBackgroundResource",
                 if (groupEnabled) R.drawable.btn_segment_recording else R.drawable.btn_segment_disabled,
             )
-            // 灵感按钮可点击条件：灵感态（保存灵感）或（普通录音态且已配置灵感文件夹）
-            // 暂停态下灵感按钮置灰不可点击
-            val segmentClickable = inspirationActive || (!isPaused && inspirationConfigured)
             if (segmentClickable) {
                 setOnClickPendingIntent(R.id.segment_button, segmentPendingIntent())
             } else {
                 setOnClickPendingIntent(R.id.segment_button, null)
             }
-            // 分组按钮：暂停态或无可切换知识库时禁用点击
-            if (isPaused || !groupEnabled) {
-                setOnClickPendingIntent(R.id.group_button, null)
-            } else {
+            if (groupEnabled) {
                 setOnClickPendingIntent(R.id.group_button, groupPendingIntent())
+            } else {
+                setOnClickPendingIntent(R.id.group_button, null)
             }
-            // 灵感模式下禁用暂停按钮点击；暂停态保持继续按钮可点击
+            // 灵感模式下（含暂停态灵感）禁用暂停/继续按钮点击
             if (pauseDisabledByInspiration) {
                 setOnClickPendingIntent(R.id.toggle_button, null)
             } else {
                 setOnClickPendingIntent(R.id.toggle_button, togglePendingIntent())
             }
-            // 提示行始终可见：有反馈时显示反馈文案，无反馈时显示默认文案（录音中/已暂停/暂停剩余 N 分钟）。
-            // 固定高度保证卡片高度恒定，避免触发锁屏卡片展开/收缩。
-            // 文字颜色根据系统深色/浅色模式动态设置：深色背景用浅色文字，浅色背景用深色文字，
-            // 保证在各厂商通知背景下均可识别。
             setTextViewText(R.id.feedback_text, if (feedbackText.isNullOrBlank()) defaultHint else feedbackText)
             val isDarkTheme = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
                 Configuration.UI_MODE_NIGHT_YES
