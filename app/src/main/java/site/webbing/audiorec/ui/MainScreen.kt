@@ -401,8 +401,9 @@ private fun RecordingRow(
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(
-                enabled = enabled,
-                onClick = onClick,
+                // 始终启用，保证录音时仍可长按出菜单（删除/重新上传/另存为）。
+                // 点击播放仍受 enabled 控制：录音时点击不触发播放，避免与录音音频焦点冲突。
+                onClick = { if (enabled) onClick() },
                 onLongClick = {
                     hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                     onLongClick()
