@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -113,6 +114,9 @@ fun SettingsScreen(
     val geoConfig by geoSettings.config.collectAsStateWithLifecycle()
     val capsuleSettings = remember { CalendarCapsuleSettings.get(context) }
     val capsuleConfig by capsuleSettings.config.collectAsStateWithLifecycle()
+
+    // 拦截系统右滑返回手势：让其回到主界面而不是退出 APP（回到桌面）
+    BackHandler(enabled = true) { onBackClick() }
 
     // 删除文件夹确认弹窗的状态：待删除的文件夹 + 该文件夹下将被删除的录音列表 + 加载标记
     var pendingDeleteFolder by remember { mutableStateOf<FolderOption?>(null) }
